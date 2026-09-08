@@ -1,0 +1,8 @@
+build/
+dist/
+*.o
+ghostlock_root
+flash_preloader.tar
+downgrade.sh
+downgrade.ps1
+downgrade.bat

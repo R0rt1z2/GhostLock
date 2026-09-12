@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define GL_PROFILE_SCHEMA 2u
+#define GL_PROFILE_SCHEMA 3u
 #define GL_PROFILE_STRING 256u
 
 struct gl_runtime {
@@ -75,6 +75,18 @@ struct gl_profile {
     uint32_t task_prio_off;
     uint32_t task_static_prio_off;
     uint32_t task_normal_prio_off;
+    uint32_t task_rt_priority_off;
+    uint32_t task_sched_class_off;
+    uint32_t task_pi_lock_off;
+    uint32_t task_pi_waiters_off;
+    uint32_t task_pi_top_task_off;
+    uint32_t task_pi_blocked_on_off;
+
+    uint32_t selinux_status_page;
+    uint32_t mem_map;
+    uint32_t pfn_offset;
+    uint32_t page_struct_size;
+    uint32_t lowmem_va_sub;
 
     char ota_sha256[GL_PROFILE_STRING];
     char boot_sha256[GL_PROFILE_STRING];

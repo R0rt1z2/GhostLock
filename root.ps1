@@ -6,10 +6,26 @@ param(
 
 $ErrorActionPreference = "Continue"
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Adb = if ($env:ADB) { $env:ADB } else { "adb" }
+
+function Resolve-Adb {
+  if ($env:ADB) { return $env:ADB }
+  if (Get-Command adb -CommandType Application -ErrorAction SilentlyContinue) { return "adb" }
+  $bundled = Join-Path $Here "bin\windows\adb.exe"
+  if (Test-Path $bundled) { return $bundled }
+  return $null
+}
+
+$Adb = Resolve-Adb
+if (-not $Adb) {
+  Write-Host "adb not found."
+  Write-Host "Install Android platform-tools and add it to PATH, or put adb.exe together with"
+  Write-Host "AdbWinApi.dll and AdbWinUsbApi.dll in bin\windows next to this script."
+  exit 1
+}
 $Remote = "/data/local/tmp/gl"
 $Log = "$Remote/run.log"
 $Settle = if ($env:SETTLE) { [int]$env:SETTLE } else { 25 }
+$PostWait = if ($env:POSTWAIT) { [int]$env:POSTWAIT } else { 30 }
 
 $script:RemoteScript = ""
 $script:ExecArg = ""
@@ -89,6 +105,7 @@ for ($i = 1; $i -le $Tries; $i++) {
 
   $result = "timeout"
   $rootedSeen = $false
+  $postn = 0
   $shown = 0
   $downs = 0
   $maxn = if ($Tarball) { 1800 } else { 120 }
@@ -105,7 +122,10 @@ for ($i = 1; $i -le $Tries; $i++) {
     if (-not $rootedSeen -and (Log-Has 'ROOT] uid=0 daemon')) {
       $rootedSeen = $true
       $result = "rooted"
-      if (-not $Tarball) { break }
+    }
+    if ($rootedSeen -and -not $Tarball) {
+      $postn++
+      if ($postn -ge $PostWait -or (Log-Has 'ota] done')) { break }
     }
     if (-not $rootedSeen -and (Log-Has 'preloaded read slot failed|holding reclaim' $true)) { $result = "failed"; break }
     if ((Adb-State) -ne "device") {

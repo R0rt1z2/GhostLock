@@ -7,12 +7,16 @@ if [ -z "${ADB:-}" ]; then
     ADB=adb
   else
     case "$(uname -s)" in
-      Linux) ADB="$HERE/bin/adb-linux" ;;
-      Darwin) ADB="$HERE/bin/adb-darwin" ;;
+      Linux) ADB="$HERE/bin/linux/adb" ;;
+      Darwin) ADB="$HERE/bin/mac/adb" ;;
       *) ADB=adb ;;
     esac
     [ -f "$ADB" ] && chmod 755 "$ADB" 2>/dev/null
   fi
+fi
+if ! command -v "$ADB" >/dev/null 2>&1; then
+  echo "adb not found: install platform-tools, set ADB=/path/to/adb, or provide bin/<os>/adb"
+  exit 1
 fi
 REMOTE=/data/local/tmp/gl
 LOG=$REMOTE/run.log
@@ -24,6 +28,7 @@ if [ -n "$1" ] && [ -f "$1" ]; then
 fi
 TRIES=${1:-15}
 SETTLE=${SETTLE:-25}
+POSTWAIT=${POSTWAIT:-30}
 
 REMOTE_TAR=
 REMOTE_SCRIPT=
@@ -103,6 +108,7 @@ for i in $(seq "$TRIES"); do
 
   result=timeout
   rooted_seen=0
+  postn=0
   downs=0
   n=0
   MAXN=120
@@ -117,7 +123,12 @@ for i in $(seq "$TRIES"); do
     if [ "$rooted_seen" = 0 ] && "$ADB" shell "grep -aq 'ROOT] uid=0 daemon' $LOG" 2>/dev/null; then
       rooted_seen=1
       result=rooted
-      [ -z "$TARBALL" ] && break
+    fi
+    if [ "$rooted_seen" = 1 ] && [ -z "$TARBALL" ]; then
+      postn=$((postn + 1))
+      if [ "$postn" -ge "$POSTWAIT" ] || "$ADB" shell "grep -aq 'ota] done' $LOG" 2>/dev/null; then
+        break
+      fi
     fi
     if [ "$rooted_seen" = 0 ] && "$ADB" shell "grep -aqE 'preloaded read slot failed|holding reclaim' $LOG" 2>/dev/null; then
       result=failed

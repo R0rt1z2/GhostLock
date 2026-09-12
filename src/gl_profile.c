@@ -61,6 +61,17 @@ enum profile_field {
     PF_TASK_PRIO,
     PF_TASK_STATIC_PRIO,
     PF_TASK_NORMAL_PRIO,
+    PF_TASK_RT_PRIORITY,
+    PF_TASK_SCHED_CLASS,
+    PF_TASK_PI_LOCK,
+    PF_TASK_PI_WAITERS,
+    PF_TASK_PI_TOP_TASK,
+    PF_TASK_PI_BLOCKED_ON,
+    PF_SELINUX_STATUS_PAGE,
+    PF_MEM_MAP,
+    PF_PFN_OFFSET,
+    PF_PAGE_STRUCT_SIZE,
+    PF_LOWMEM_VA_SUB,
     PF_OTA_SHA256,
     PF_BOOT_SHA256,
     PF_KERNEL_SHA256,
@@ -92,11 +103,20 @@ static char *trim(char *text) {
     return text;
 }
 
+#define PF_WORDS ((PF_COUNT + 63u) / 64u)
+
+static int field_seen(const uint64_t *present, enum profile_field field) {
+    return (present[field / 64u] >> (field % 64u)) & 1u;
+}
+
+static void field_mark(uint64_t *present, enum profile_field field) {
+    present[field / 64u] |= UINT64_C(1) << (field % 64u);
+}
+
 static int assign_string(char *destination, size_t destination_size, const char *value,
                          uint64_t *present, enum profile_field field, const char *key, char *error,
                          size_t error_size) {
-    uint64_t bit = UINT64_C(1) << field;
-    if (*present & bit) {
+    if (field_seen(present, field)) {
         set_error(error, error_size, "duplicate profile key: %s", key);
         return 0;
     }
@@ -105,14 +125,13 @@ static int assign_string(char *destination, size_t destination_size, const char 
         return 0;
     }
     strcpy(destination, value);
-    *present |= bit;
+    field_mark(present, field);
     return 1;
 }
 
 static int assign_u32(uint32_t *destination, const char *value, uint64_t *present,
                       enum profile_field field, const char *key, char *error, size_t error_size) {
-    uint64_t bit = UINT64_C(1) << field;
-    if (*present & bit) {
+    if (field_seen(present, field)) {
         set_error(error, error_size, "duplicate profile key: %s", key);
         return 0;
     }
@@ -124,7 +143,7 @@ static int assign_u32(uint32_t *destination, const char *value, uint64_t *presen
         return 0;
     }
     *destination = (uint32_t)parsed;
-    *present |= bit;
+    field_mark(present, field);
     return 1;
 }
 
@@ -191,6 +210,17 @@ static int parse_entry(struct gl_profile *profile, uint64_t *present, const char
     U32_ENTRY("offset.task_prio", task_prio_off, PF_TASK_PRIO);
     U32_ENTRY("offset.task_static_prio", task_static_prio_off, PF_TASK_STATIC_PRIO);
     U32_ENTRY("offset.task_normal_prio", task_normal_prio_off, PF_TASK_NORMAL_PRIO);
+    U32_ENTRY("offset.task_rt_priority", task_rt_priority_off, PF_TASK_RT_PRIORITY);
+    U32_ENTRY("offset.task_sched_class", task_sched_class_off, PF_TASK_SCHED_CLASS);
+    U32_ENTRY("offset.task_pi_lock", task_pi_lock_off, PF_TASK_PI_LOCK);
+    U32_ENTRY("offset.task_pi_waiters", task_pi_waiters_off, PF_TASK_PI_WAITERS);
+    U32_ENTRY("offset.task_pi_top_task", task_pi_top_task_off, PF_TASK_PI_TOP_TASK);
+    U32_ENTRY("offset.task_pi_blocked_on", task_pi_blocked_on_off, PF_TASK_PI_BLOCKED_ON);
+    U32_ENTRY("address.selinux_status_page", selinux_status_page, PF_SELINUX_STATUS_PAGE);
+    U32_ENTRY("address.mem_map", mem_map, PF_MEM_MAP);
+    U32_ENTRY("address.pfn_offset", pfn_offset, PF_PFN_OFFSET);
+    U32_ENTRY("layout.page_struct_size", page_struct_size, PF_PAGE_STRUCT_SIZE);
+    U32_ENTRY("layout.lowmem_va_sub", lowmem_va_sub, PF_LOWMEM_VA_SUB);
     U32_ENTRY("address.selinux_enforcing", selinux_enforcing, PF_SELINUX_ENFORCING);
     U32_ENTRY("offset.cred_cap_permitted", cred_cap_permitted_off, PF_CRED_CAP_PERMITTED);
     U32_ENTRY("offset.cred_cap_effective", cred_cap_effective_off, PF_CRED_CAP_EFFECTIVE);
@@ -215,7 +245,7 @@ static int parse_entry(struct gl_profile *profile, uint64_t *present, const char
 static int parse_profile_stream(FILE *file, const char *label, struct gl_profile *profile,
                                 char *error, size_t error_size) {
     memset(profile, 0, sizeof(*profile));
-    uint64_t present = 0;
+    uint64_t present[PF_WORDS] = {0};
     char line[1024];
     unsigned line_number = 0;
     while (fgets(line, sizeof(line), file)) {
@@ -236,7 +266,7 @@ static int parse_profile_stream(FILE *file, const char *label, struct gl_profile
         char *key = trim(entry);
         char *value = trim(separator + 1);
         char detail[256] = {0};
-        if (!*key || !*value || !parse_entry(profile, &present, key, value, detail, sizeof(detail))) {
+        if (!*key || !*value || !parse_entry(profile, present, key, value, detail, sizeof(detail))) {
             set_error(error, error_size, "%s:%u: %s", label, line_number,
                       detail[0] ? detail : "invalid entry");
             return 0;
@@ -247,14 +277,11 @@ static int parse_profile_stream(FILE *file, const char *label, struct gl_profile
         return 0;
     }
 
-    uint64_t required = (UINT64_C(1) << PF_COUNT) - 1;
-    if (present != required) {
-        for (unsigned field = 0; field < PF_COUNT; field++)
-            if (!(present & (UINT64_C(1) << field))) {
-                set_error(error, error_size, "%s: missing required profile field %u", label, field);
-                return 0;
-            }
-    }
+    for (unsigned field = 0; field < PF_COUNT; field++)
+        if (!field_seen(present, (enum profile_field)field)) {
+            set_error(error, error_size, "%s: missing required profile field %u", label, field);
+            return 0;
+        }
     if (profile->profile_version != GL_PROFILE_SCHEMA) {
         set_error(error, error_size, "%s: unsupported profile version %u", label,
                   profile->profile_version);

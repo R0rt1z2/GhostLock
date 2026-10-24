@@ -45,7 +45,9 @@ disable_wifi() {
 }
 
 stop_tail() {
-  [ -n "$TAIL" ] && kill "$TAIL" 2>/dev/null
+  if [ -n "$TAIL" ]; then
+    kill "$TAIL" 2>/dev/null || true
+  fi
   TAIL=
 }
 restore_tty() {

@@ -48,6 +48,9 @@ struct gl_profile {
     uint32_t task_real_cred_off;
     uint32_t task_cred_off;
     uint32_t task_comm_off;
+    uint32_t task_pi_waiters_off;
+    uint32_t task_pi_waiters_leftmost_off;
+    uint32_t task_pi_blocked_on_off;
 
     uint32_t fops_read_off;
     uint32_t fops_ioctl_off;
@@ -68,6 +71,9 @@ struct gl_profile {
     uint32_t stamp_socket_kind;
 
     uint32_t selinux_enforcing;
+    uint32_t selinux_status_page;
+    uint32_t mem_map_va;
+    uint32_t pfn_offset_va;
     uint32_t cred_cap_permitted_off;
     uint32_t cred_cap_effective_off;
     uint32_t cred_cap_bset_off;

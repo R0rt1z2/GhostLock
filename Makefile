@@ -1,11 +1,14 @@
 API      ?= 28
 VERSION  := $(shell cat VERSION 2>/dev/null || echo 0.0.0)
 OUTDIR   ?= build
+SHA256SUM ?= $(if $(shell command -v sha256sum 2>/dev/null),sha256sum,shasum -a 256)
 BIN      := $(OUTDIR)/ghostlock_root
 
 DEFAULT_NDK := $(HOME)/.cache/android-ndk/android-ndk-r27d
 NDK      ?= $(or $(ANDROID_NDK_HOME),$(ANDROID_NDK_ROOT),$(wildcard $(DEFAULT_NDK)))
-NDK_CC   := $(if $(NDK),$(NDK)/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi$(API)-clang)
+HOST_OS  := $(shell uname -s)
+NDK_HOST ?= $(if $(filter Darwin,$(HOST_OS)),darwin-x86_64,linux-x86_64)
+NDK_CC   := $(if $(NDK),$(NDK)/toolchains/llvm/prebuilt/$(NDK_HOST)/bin/armv7a-linux-androideabi$(API)-clang)
 
 ifneq ($(origin CC),default)
   TARGET_CC := $(CC)
@@ -29,7 +32,7 @@ all: $(BIN)
 
 $(BIN): $(SRCS) $(HDRS) | $(OUTDIR)
 	$(TARGET_CC) $(CFLAGS) $(SRCS) -o $@
-	@sha256sum $@
+	@$(SHA256SUM) $@
 
 $(OUTDIR):
 	mkdir -p $@

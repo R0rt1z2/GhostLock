@@ -1,11 +1,34 @@
-[CmdletBinding()]
 param(
   [string]$Tarball = "",
-  [int]$Tries = 15
+  [int]$Tries = 0
 )
+
+$ExploitName = "ghostlock_root"
+$ExploitBuild = "build\ghostlock_root"
+$RemoteDir = "/data/local/tmp/gl"
+$Log = "$RemoteDir/run.log"
+$Clean = $RemoteDir
+$CanExec = $true
+$IsRooted = "grep -aq 'ROOT] uid=0 daemon' $Log"
+$IsReady = "grep -aq 'ota] done' $Log"
+$HasFailed = "grep -aqE 'preloaded read slot failed|holding reclaim' $Log"
+$RootShell = "su || $RemoteDir/su || $RemoteDir/ghostlock_root --su"
+$DefaultTries = 15
+$DefaultSettle = 25
+$RootTimeout = 120
 
 $ErrorActionPreference = "Continue"
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$PostWait = if ($env:POSTWAIT) { [int]$env:POSTWAIT } else { 30 }
+$Settle = if ($env:SETTLE) { [int]$env:SETTLE } else { $DefaultSettle }
+$ExecTimeout = if ($env:EXEC_TIMEOUT) { [int]$env:EXEC_TIMEOUT } else { 1800 }
+
+function Show-Usage {
+  if ($CanExec) { Write-Host "Usage: root.bat [SCRIPT.tar] [TRIES]" }
+  else { Write-Host "Usage: root.bat [TRIES]" }
+}
+
+if ($Tarball -eq "/?") { Show-Usage; exit 0 }
 
 function Resolve-Adb {
   if ($env:ADB) { return $env:ADB }
@@ -16,140 +39,215 @@ function Resolve-Adb {
 }
 
 $Adb = Resolve-Adb
-if (-not $Adb) {
-  Write-Host "adb not found."
-  Write-Host "Install Android platform-tools and add it to PATH, or put adb.exe together with"
-  Write-Host "AdbWinApi.dll and AdbWinUsbApi.dll in bin\windows next to this script."
+$AdbOk = $false
+if ($Adb) {
+  try { & $Adb version *> $null; $AdbOk = ($LASTEXITCODE -eq 0) } catch { $AdbOk = $false }
+}
+if (-not $AdbOk) {
+  Write-Host "adb not found or not runnable."
+  Write-Host "Install Android platform-tools and add it to PATH, set ADB to the full path of adb.exe,"
+  Write-Host "or put adb.exe together with AdbWinApi.dll and AdbWinUsbApi.dll in bin\windows next to this script."
   exit 1
 }
-$Remote = "/data/local/tmp/gl"
-$Log = "$Remote/run.log"
-$Settle = if ($env:SETTLE) { [int]$env:SETTLE } else { 25 }
-$PostWait = if ($env:POSTWAIT) { [int]$env:POSTWAIT } else { 30 }
 
-$script:RemoteScript = ""
-$script:ExecArg = ""
+$Bin = $env:EXPLOIT
+if (-not $Bin) {
+  foreach ($cand in @((Join-Path $Here "bin\$ExploitName"), (Join-Path $Here $ExploitBuild))) {
+    if (Test-Path $cand -PathType Leaf) { $Bin = $cand; break }
+  }
+}
+if (-not $Bin -or -not (Test-Path $Bin -PathType Leaf)) {
+  $name = if ($Bin) { $Bin } else { $ExploitName }
+  Write-Host ("{0} not found: build it first, or set EXPLOIT to the full path of {1}" -f $name, $ExploitName)
+  exit 1
+}
+
+if ($Tarball -and -not (Test-Path $Tarball -PathType Leaf)) {
+  if ($Tarball -match '^\d+$' -and $Tries -eq 0) {
+    $Tries = [int]$Tarball
+    $Tarball = ""
+  } else {
+    Show-Usage
+    exit 1
+  }
+}
+if ($Tarball) {
+  if (-not $CanExec) {
+    Write-Host ("{0}: running a script after root is not supported on this branch" -f $Tarball)
+    exit 1
+  }
+  $Tarball = (Resolve-Path $Tarball).Path
+}
+if ($Tries -le 0) { $Tries = $DefaultTries }
+
+$Sel = @()
+$Serial = $env:ANDROID_SERIAL
+if (-not $Serial) {
+  $online = @(& $Adb devices 2>$null | ForEach-Object { if (($_ -replace "`r", "") -match '^(\S+)\s+device$') { $Matches[1] } })
+  if ($online.Count -gt 1) {
+    Write-Host "More than one device is connected; set ANDROID_SERIAL to the one to root"
+    exit 1
+  }
+  if ($online.Count -eq 1) { $Serial = $online[0] }
+}
+if ($Serial) {
+  $Sel = @("-s", $Serial)
+  Write-Host "Using device $Serial"
+}
 
 function AdbText {
-  $out = & $Adb @args 2>$null
+  $out = & $Adb @Sel @args 2>$null
   if ($null -eq $out) { return "" }
   return (($out -join "`n") -replace "`r", "").Trim()
-}
-
-$Bin = $null
-foreach ($cand in @((Join-Path $Here "ghostlock_root"), (Join-Path $Here "build\ghostlock_root"))) {
-  if (Test-Path $cand) { $Bin = $cand; break }
-}
-if (-not $Bin) { Write-Host "ghostlock_root not found next to this script"; exit 1 }
-
-if ($Tarball) {
-  if (-not (Test-Path $Tarball)) { Write-Host "tarball not found: $Tarball"; exit 1 }
-  $Tarball = (Resolve-Path $Tarball).Path
-  $RemoteTar = "$Remote/" + (Split-Path -Leaf $Tarball)
 }
 
 function Adb-State { AdbText get-state }
 
 function Disable-Wifi {
   $serial = AdbText get-serialno
-  if ($serial -notmatch ':\d' -and $serial -notmatch '_tcp') {
-    & $Adb shell svc wifi disable *> $null
+  if ($serial -notmatch ':\d' -and $serial -notmatch '\._tcp$') {
+    & $Adb @Sel shell svc wifi disable *> $null
+  }
+}
+
+function Wait-Offline {
+  for ($w = 0; $w -lt 30 -and (Adb-State) -eq "device"; $w++) { Start-Sleep -Seconds 1 }
+}
+
+function Wait-Online {
+  for ($r = 0; (Adb-State) -ne "device"; $r++) {
+    if ($Serial -match ':\d' -and $r % 5 -eq 0) {
+      & $Adb disconnect $Serial *> $null
+      & $Adb connect $Serial *> $null
+    }
+    Start-Sleep -Seconds 2
   }
 }
 
 function Wait-Boot {
-  & $Adb wait-for-device 2>$null | Out-Null
-  for ($i = 0; $i -lt 120; $i++) {
+  Wait-Online
+  for ($n = 0; $n -lt 120; $n++) {
+    if ((Adb-State) -ne "device") { Wait-Online }
     if ((AdbText shell getprop sys.boot_completed) -eq "1") { break }
     Start-Sleep -Seconds 2
   }
   Start-Sleep -Seconds $Settle
 }
 
-function Log-Has([string]$pattern, [bool]$ext = $false) {
-  $flag = if ($ext) { "-aqE" } else { "-aq" }
-  $out = & $Adb shell "grep $flag '$pattern' $Log && echo GL_HIT" 2>$null
-  return (($out -join "`n") -match "GL_HIT")
-}
-
+$script:ExecArg = ""
+$script:RemoteScript = ""
 function Stage {
-  if ((Adb-State) -ne "device") { Write-Host "  [stage] device not online"; return $false }
-  & $Adb shell "rm -rf $Remote; mkdir -p $Remote" *> $null; if ($LASTEXITCODE -ne 0) { Write-Host "  [stage] mkdir failed"; return $false }
-  & $Adb push $Bin "$Remote/ghostlock_root" *> $null; if ($LASTEXITCODE -ne 0) { Write-Host "  [stage] push binary failed"; return $false }
-  & $Adb shell "chmod 755 $Remote/ghostlock_root" *> $null; if ($LASTEXITCODE -ne 0) { Write-Host "  [stage] chmod failed"; return $false }
-  if ($Tarball) {
-    $base = Split-Path -Leaf $Tarball
-    & $Adb push $Tarball $RemoteTar *> $null; if ($LASTEXITCODE -ne 0) { Write-Host "  [stage] push $base failed"; return $false }
-    & $Adb shell "cd $Remote && { tar xf '$base' || gzip -dc '$base' | tar xf - || gunzip -c '$base' | tar xf -; } 2>/dev/null; true" *> $null
-    $found = AdbText shell "find $Remote -type f -name '*.sh' | LC_ALL=C sort | head -1"
-    if (-not $found) {
-      Write-Host "  [stage] extract produced no .sh inside $base; device tar said:"
-      (& $Adb shell "cd $Remote && tar xf '$base'" 2>&1) | ForEach-Object { Write-Host "    $_" }
-      return $false
-    }
-    $script:RemoteScript = $found
-    & $Adb shell "chmod 755 '$found'" *> $null
-    $script:ExecArg = "--exec $found"
+  if ((Adb-State) -ne "device") { Write-Host "Device is not online"; return $false }
+  & $Adb @Sel shell "rm -rf $Clean; mkdir -p $RemoteDir" *> $null
+  if ($LASTEXITCODE -ne 0) { Write-Host "Could not prepare $RemoteDir"; return $false }
+  & $Adb @Sel push $Bin "$RemoteDir/$ExploitName" *> $null
+  if ($LASTEXITCODE -ne 0) { Write-Host "Could not push $ExploitName"; return $false }
+  & $Adb @Sel shell "chmod 755 $RemoteDir/$ExploitName" *> $null
+  if ($LASTEXITCODE -ne 0) { Write-Host "Could not chmod $ExploitName"; return $false }
+  if (-not $Tarball) { return $true }
+
+  $base = Split-Path -Leaf $Tarball
+  & $Adb @Sel push $Tarball "$RemoteDir/$base" *> $null
+  if ($LASTEXITCODE -ne 0) { Write-Host "Could not push $base"; return $false }
+  & $Adb @Sel shell "cd $RemoteDir && { tar xf '$base' || gzip -dc '$base' | tar xf - || gunzip -c '$base' | tar xf -; } 2>/dev/null; true" *> $null
+  $found = AdbText shell "find $RemoteDir -type f -name '*.sh' | LC_ALL=C sort | head -n 1"
+  if (-not $found) {
+    Write-Host "No .sh found inside $base; the device tar said:"
+    (& $Adb @Sel shell "cd $RemoteDir && tar xf '$base'" 2>&1) | ForEach-Object { Write-Host "  $_" }
+    return $false
   }
+  & $Adb @Sel shell "chmod 755 '$found'" *> $null
+  $script:RemoteScript = $found
+  $script:ExecArg = "--exec $found"
   return $true
 }
 
+function Probe {
+  $exited = if ($Tarball) { "grep -aq 'exited status=' $Log" } else { "false" }
+  $out = AdbText shell "{ if $exited; then echo exited; elif $IsReady; then echo ready; elif $IsRooted; then echo rooted; elif $HasFailed; then echo failed; else echo running; fi; } 2>/dev/null"
+  return ($out -split "`n")[-1].Trim()
+}
+
+$script:Shown = 0
+function Show-Log {
+  $lines = @(& $Adb @Sel shell "tail -n +$($script:Shown + 1) $Log 2>/dev/null" 2>$null)
+  foreach ($line in $lines) { Write-Host ($line -replace "`r", "") }
+  $script:Shown += $lines.Count
+}
+
 for ($i = 1; $i -le $Tries; $i++) {
-  Write-Host "Attempt $i/$Tries"
-  if ((Adb-State) -eq "device") { & $Adb reboot *> $null }
+  Write-Host "Attempt $i of $Tries"
+
+  if ((Adb-State) -eq "device") {
+    & $Adb @Sel reboot *> $null
+    Wait-Offline
+  }
   Wait-Boot
   Disable-Wifi
-  if (-not (Stage)) { continue }
+  if (-not (Stage)) {
+    Write-Host "Attempt $i failed"
+    continue
+  }
 
-  & $Adb shell "cd $Remote && (nohup ./ghostlock_root $script:ExecArg >run.log 2>&1 &); sleep 1" *> $null
+  & $Adb @Sel shell "cd $RemoteDir && (nohup ./$ExploitName $script:ExecArg >$Log 2>&1 &); sleep 1" *> $null
+  $script:Shown = 0
 
   $result = "timeout"
-  $rootedSeen = $false
-  $postn = 0
-  $shown = 0
+  $rooted = $false
+  $limit = $RootTimeout
+  $waited = 0
   $downs = 0
-  $maxn = if ($Tarball) { 1800 } else { 120 }
-  for ($n = 0; $n -lt $maxn; $n++) {
+  while ($waited -lt $limit) {
     Start-Sleep -Seconds 1
-
-    $lines = @(& $Adb shell "cat $Log 2>/dev/null")
-    if ($lines.Count -gt $shown) {
-      for ($k = $shown; $k -lt $lines.Count; $k++) { Write-Host ($lines[$k] -replace "`r", "") }
-      $shown = $lines.Count
-    }
-
-    if ($Tarball -and (Log-Has 'exited status=')) { $result = "execdone"; break }
-    if (-not $rootedSeen -and (Log-Has 'ROOT] uid=0 daemon')) {
-      $rootedSeen = $true
-      $result = "rooted"
-    }
-    if ($rootedSeen -and -not $Tarball) {
-      $postn++
-      if ($postn -ge $PostWait -or (Log-Has 'ota] done')) { break }
-    }
-    if (-not $rootedSeen -and (Log-Has 'preloaded read slot failed|holding reclaim' $true)) { $result = "failed"; break }
+    $waited++
     if ((Adb-State) -ne "device") {
       $downs++
-      if ($downs -ge 3) { $result = "down"; break }
+      if ($downs -ge 3) { $result = "offline"; break }
+      continue
+    }
+    $downs = 0
+    Show-Log
+    $state = Probe
+    if ($state -eq "exited" -or $state -eq "failed") { $result = $state; break }
+    if ($state -eq "ready" -or $state -eq "rooted") {
+      if (-not $rooted) {
+        $rooted = $true
+        $waited = 0
+        $limit = if ($Tarball) { $ExecTimeout } else { $PostWait }
+      }
+      if ($state -eq "ready" -and -not $Tarball) { $result = "ready"; break }
+    }
+  }
+  if ($result -ne "offline") { Show-Log }
+
+  $scriptName = if ($script:RemoteScript) { Split-Path -Leaf $script:RemoteScript } else { "" }
+  if ($result -eq "exited") {
+    $status = AdbText shell "grep -a 'exited status=' $Log | tail -n 1 | sed 's/.*status=//' | tr -dc '0-9-'"
+    $shownStatus = if ($status) { $status } else { "unknown" }
+    Write-Host ("{0} exited with status {1}" -f $scriptName, $shownStatus)
+    if ($status -match '^\d+$') { exit ([int]$status) } else { exit 1 }
+  }
+
+  if ($rooted -and $Tarball) {
+    if ($result -eq "offline") {
+      Write-Host ("Rooted, but the device went offline before {0} finished; see {1}" -f $scriptName, $Log)
     } else {
-      $downs = 0
+      Write-Host ("Rooted, but {0} did not finish within {1}s; see {2}" -f $scriptName, $ExecTimeout, $Log)
     }
+    exit 1
   }
 
-  if ($result -eq "execdone") {
-    $status = AdbText shell "grep -a 'exited status=' $Log | tail -1 | sed 's/.*status=//' | tr -dc '0-9-'"
-    if (-not $status) { $status = "?" }
-    if ($status -match '^-?\d+$') { exit [int]$status } else { exit 0 }
+  if ($rooted -and $result -ne "offline") {
+    & $Adb @Sel shell -t $RootShell
+    exit $LASTEXITCODE
   }
 
-  if ($result -eq "rooted") {
-    if ($Tarball) {
-      Write-Host ("Rooted, but {0} did not report completion within the wait window; see {1}." -f (Split-Path -Leaf $script:RemoteScript), $Log)
-      exit 1
-    }
-    & $Adb shell -t "su || $Remote/su || $Remote/ghostlock_root --su"
-    exit 0
+  switch ($result) {
+    "failed" { Write-Host "Attempt $i failed: the exploit gave up" }
+    "offline" { Write-Host "Attempt $i failed: the device went offline" }
+    default { Write-Host "Attempt $i failed: timed out" }
   }
 }
 
+Write-Host "Failed after $Tries attempts"
 exit 1

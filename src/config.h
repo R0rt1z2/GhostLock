@@ -39,6 +39,7 @@ struct ksym_config {
 
   uint64_t init_cred_off;
   uint64_t panic_scratch_off;
+  uint64_t dump_skip_zeroes_off;
 };
 
 extern struct ksym_config g_ksym;

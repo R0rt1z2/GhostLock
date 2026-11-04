@@ -32,7 +32,8 @@ int install_embedded_su(pid_t *daemon_pid) {
 }
 
 __attribute__((weak))
-int install_embedded_exp32(void) {
+int install_embedded_exp32(const char *path) {
+  (void)path;
   errno = ENOSYS;
   return 0;
 }

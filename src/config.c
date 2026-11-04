@@ -39,6 +39,9 @@ struct ksym_config g_ksym = {
 #ifdef PANIC_SCRATCH_OFF
   .panic_scratch_off = PANIC_SCRATCH_OFF,
 #endif
+#ifdef DUMP_SKIP_ZEROES_OFF
+  .dump_skip_zeroes_off = DUMP_SKIP_ZEROES_OFF,
+#endif
 };
 
 #define KSYM_CONFIG_ENV "IONSTACK_CONFIG"
@@ -83,6 +86,7 @@ static const struct {
 
   KSYM_KEY(init_cred_off),
   KSYM_KEY(panic_scratch_off),
+  KSYM_KEY(dump_skip_zeroes_off),
 #undef KSYM_KEY
 };
 

@@ -1,5 +1,5 @@
 API ?= 35
-PROJECT ?= sunstone
+PROJECT ?= raspite
 OUTDIR ?= build/$(PROJECT)/bin
 EMBEDDIR ?= build/$(PROJECT)/embed
 
@@ -146,11 +146,21 @@ $(EMBED_SU): src/su_daemon.c | $(EMBEDDIR)
 
 EXP32_SRCS := src/exp32/main.c src/exp32/stack.c
 
+ifeq ($(PROJECT),raspite)
+  EXP_STAGE_CC := $(TARGET_CC)
+  EXP_STAGE_FLAGS := $(TARGET_FLAGS)
+  EXP_STAGE_LDFLAGS := $(TARGET_PIE_LDFLAGS)
+else
+  EXP_STAGE_CC := $(TARGET_CC32)
+  EXP_STAGE_FLAGS := $(TARGET32_FLAGS)
+  EXP_STAGE_LDFLAGS := $(TARGET32_PIE_LDFLAGS)
+endif
+
 $(EMBED_EXP32): $(EXP32_SRCS) src/kernelsnitch/utils.h $(TARGET_HEADER) src/offset.h | $(EMBEDDIR)
-	$(TARGET_CC32) $(TARGET32_FLAGS) -O2 -g0 -Wall -Isrc $(DEBUG_CFLAGS) \
+	$(EXP_STAGE_CC) $(EXP_STAGE_FLAGS) -O2 -g0 -Wall -Isrc $(DEBUG_CFLAGS) \
 	  $(TARGET_CFLAGS) \
 	  -Wno-unused-parameter -Wno-unused-function \
-	  -fPIE -pie -static $(EXP32_SRCS) $(TARGET32_PIE_LDFLAGS) -o $@
+	  -fPIE -pie -static $(EXP32_SRCS) $(EXP_STAGE_LDFLAGS) -o $@
 
 $(PRELOAD): $(PRELOAD_SRCS) $(EMBED_SU) $(EMBED_EXP32) $(TARGET_HEADER) src/offset.h src/common.h src/config.h src/kernelsnitch/*.h | $(OUTDIR)
 	$(TARGET_CC) $(TARGET_FLAGS) $(SO_CFLAGS) $(WARN_CFLAGS) $(TARGET_CFLAGS) \
@@ -169,6 +179,8 @@ info:
 	@echo "TARGET_CC32=$(TARGET_CC32)"
 	@echo "TARGET32_FLAGS=$(TARGET32_FLAGS)"
 	@echo "TARGET32_PIE_LDFLAGS=$(TARGET32_PIE_LDFLAGS)"
+	@echo "EXP_STAGE_CC=$(EXP_STAGE_CC)"
+	@echo "EXP_STAGE_FLAGS=$(EXP_STAGE_FLAGS)"
 	@echo "PRELOAD=$(PRELOAD)"
 	@echo "EMBED_SU=$(EMBED_SU)"
 	@echo "EMBED_EXP32=$(EMBED_EXP32)"

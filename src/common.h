@@ -81,6 +81,8 @@ extern pid_t g_exp32_child;
 void groom_tunables_init(void);
 #ifdef ROOT_CHAIN
 extern pid_t g_root_child;
+extern int g_spawn_root_on_stage_ready;
+extern int g_spawn_root_burst;
 void root_chain_spawn_child(void);
 int  root_chain_run(void);
 #endif
@@ -396,7 +398,7 @@ extern int memfd_leak;
 int run_exploit(int argc, char **argv);
 int install_embedded_su(pid_t *daemon_pid);
 int install_local_su_client(void);
-int install_embedded_exp32(void);
+int install_embedded_exp32(const char *path);
 void read_first_line(const char *path, char *buf, size_t len);
 void log_startup_context(void);
 void disable_rseq_for_thread(void);

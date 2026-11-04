@@ -231,17 +231,22 @@ int install_local_su_client(void) {
   return ok;
 }
 
-int install_embedded_exp32(void) {
+int install_embedded_exp32(const char *path) {
   static int installed;
   if (installed) {
     return 1;
   }
 
+  if (!path || !*path) {
+    errno = EINVAL;
+    return 0;
+  }
+
   size_t size = (size_t)(embedded_exp32_end - embedded_exp32_start);
-  int fd = open(EXP32_LOCAL, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
+  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
   if (fd < 0) {
     pr_warning("Embedded exp32 open failed path=%s errno=%d\n",
-               EXP32_LOCAL, errno);
+               path, errno);
     return 0;
   }
   int ok = write_full(fd, embedded_exp32_start, size);
@@ -256,13 +261,13 @@ int install_embedded_exp32(void) {
   }
   if (!ok) {
     pr_warning("Embedded exp32 write failed path=%s errno=%d\n",
-               EXP32_LOCAL, saved_errno);
+               path, saved_errno);
     errno = saved_errno;
     return 0;
   }
 
   installed = 1;
-  pr_debug("Embedded exp32 wrote %zu bytes to %s\n", size, EXP32_LOCAL);
+  pr_debug("Embedded exp32 wrote %zu bytes to %s\n", size, path);
   return 1;
 }
 
@@ -349,6 +354,8 @@ static void load(void) {
 }
 int main(int argc, char const *argv[])
 {
+  (void)argc;
+  (void)argv;
   load();
   return 0;
 }

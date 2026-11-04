@@ -1,6 +1,6 @@
 #!/bin/sh
 EXPLOIT_NAME=preload
-EXPLOIT_BUILD=build/${PROJECT:-sunstone}/bin/preload
+EXPLOIT_BUILD=build/${PROJECT:-raspite}/bin/preload
 REMOTE_DIR=/data/local/tmp
 LOG=$REMOTE_DIR/ghostlock.log
 CLEAN="$REMOTE_DIR/ghostlock.proof $LOG"

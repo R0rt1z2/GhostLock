@@ -2,7 +2,7 @@
 set -e
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-PROJECT=${PROJECT:-sunstone}
+PROJECT=${PROJECT:-raspite}
 EXPLOIT_NAME=preload
 EXPLOIT_BUILD=build/$PROJECT/bin/preload
 EXTRAS=

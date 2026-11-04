@@ -32,11 +32,14 @@ PRELOAD_SRCS := $(CORE_SRCS) src/preload.c src/su_blob.S src/exp32_blob.S
 
 DEFAULT_NDK_ROOT := $(HOME)/android-ndk-cache/android-ndk-r29
 NDK_ROOT ?= $(or $(ANDROID_NDK_HOME),$(ANDROID_NDK_ROOT),$(wildcard $(DEFAULT_NDK_ROOT)))
-NDK_TOOLCHAIN ?= $(if $(NDK_ROOT),$(NDK_ROOT)/toolchains/llvm/prebuilt/linux-x86_64)
+HOST_OS := $(shell uname -s)
+NDK_HOST ?= $(if $(filter Darwin,$(HOST_OS)),darwin-x86_64,linux-x86_64)
+NDK_TOOLCHAIN ?= $(if $(NDK_ROOT),$(NDK_ROOT)/toolchains/llvm/prebuilt/$(NDK_HOST))
 NDK_CC := $(NDK_TOOLCHAIN)/bin/aarch64-linux-android$(API)-clang
 API32 ?= 28
 NDK_CC32 := $(NDK_TOOLCHAIN)/bin/armv7a-linux-androideabi$(API32)-clang
 HOST_CLANG ?= clang
+SHA256SUM ?= $(if $(shell command -v sha256sum 2>/dev/null),sha256sum,shasum -a 256)
 SYSROOT ?= $(if $(NDK_TOOLCHAIN),$(NDK_TOOLCHAIN)/sysroot)
 RESOURCE_DIR ?= $(if $(NDK_TOOLCHAIN),$(NDK_TOOLCHAIN)/lib/clang/21)
 
@@ -154,7 +157,7 @@ $(PRELOAD): $(PRELOAD_SRCS) $(EMBED_SU) $(EMBED_EXP32) $(TARGET_HEADER) src/offs
 	  $(BLOB_CFLAGS) $(PROBE_CFLAGS) \
 	  $(PRELOAD_SRCS) $(TARGET_COMMON_LDFLAGS) -static\
 	  -o $@ -pthread
-	sha256sum $@
+	$(SHA256SUM) $@
 
 info:
 	@echo "PROJECT=$(PROJECT)"
@@ -172,7 +175,7 @@ info:
 	@echo "CORE_SRCS=$(CORE_SRCS)"
 
 list-projects:
-	@find src/targets -mindepth 2 -maxdepth 2 -name target.h -printf '%h\n' | sed 's#src/targets/##' | sort
+	@find src/targets -mindepth 2 -maxdepth 2 -name target.h | sed -e 's#^src/targets/##' -e 's#/target.h$$##' | sort
 
 clean:
 	rm -rf build

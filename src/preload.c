@@ -2,31 +2,29 @@
 #include <sys/mount.h>
 
 static const char *const SU_DIRS[] = {
+  "/product/bin",
+  "/system_ext/bin",
+  "/vendor/bin",
+  "/apex/com.android.runtime/bin",
   "/system/xbin",
-  "/apex/com.android.virt/app",
+  "/system/bin",
 };
-#define SU_OVL_UPPER "/data/local/tmp/.su_upper"
-#define SU_OVL_WORK "/data/local/tmp/.su_work"
+
+static const char *const SU_UPPER_BASES[] = {
+  "/dev",
+  "/mnt",
+  "/cache",
+  "/metadata",
+  "/persist",
+};
+
+static char g_ovl_upper[192];
+static char g_ovl_work[192];
 #define SU_LOCAL "/data/local/tmp/su"
 
 static char g_su_dir[128];
 static char g_su_dst[160];
 
-static int pick_su_dir(void) {
-  if (g_su_dir[0]) {
-    return 1;
-  }
-  for (size_t i = 0; i < sizeof(SU_DIRS) / sizeof(SU_DIRS[0]); i++) {
-    struct stat st;
-    if (stat(SU_DIRS[i], &st) == 0 && S_ISDIR(st.st_mode)) {
-      snprintf(g_su_dir, sizeof(g_su_dir), "%s", SU_DIRS[i]);
-      snprintf(g_su_dst, sizeof(g_su_dst), "%s/su", g_su_dir);
-      return 1;
-    }
-  }
-  pr_warning("Su install: no usable host directory\n");
-  return 0;
-}
 #define SU_SOCK "/data/local/tmp/temp_su.sock"
 #define SU_LOG "/data/local/tmp/su_daemon.log"
 
@@ -72,32 +70,76 @@ static int path_is_mounted(const char *path) {
   return strstr(mounts, needle) != NULL;
 }
 
-static int ensure_su_mount(void) {
-  if (!pick_su_dir()) {
+static int in_default_path(const char *dir) {
+  const char *path = getenv("PATH");
+  if (!path || !*path) return 1;
+  size_t len = strlen(dir);
+  for (const char *p = path; *p;) {
+    const char *end = strchr(p, ':');
+    size_t n = end ? (size_t)(end - p) : strlen(p);
+    if (n == len && strncmp(p, dir, n) == 0) return 1;
+    if (!end) break;
+    p = end + 1;
+  }
+  return 0;
+}
+
+static int try_overlay_with(const char *dir, const char *upper_base) {
+  struct stat st;
+  if (stat(upper_base, &st) != 0 || !S_ISDIR(st.st_mode)) return 0;
+
+  snprintf(g_ovl_upper, sizeof(g_ovl_upper), "%s/.ghostlock_upper", upper_base);
+  snprintf(g_ovl_work, sizeof(g_ovl_work), "%s/.ghostlock_work", upper_base);
+  mkdir(g_ovl_upper, 0755);
+  mkdir(g_ovl_work, 0755);
+
+  char opts[640];
+  snprintf(opts, sizeof(opts), "lowerdir=%s,upperdir=%s,workdir=%s",
+           dir, g_ovl_upper, g_ovl_work);
+  if (mount("overlay", dir, "overlay", 0, opts) != 0) {
+    pr_debug("Su mount: overlay %s upper=%s failed errno=%d\n",
+             dir, upper_base, errno);
+    rmdir(g_ovl_upper);
+    rmdir(g_ovl_work);
+    g_ovl_upper[0] = 0;
+    g_ovl_work[0] = 0;
     return 0;
   }
-  if (path_is_mounted(g_su_dir)) {
+  snprintf(g_su_dir, sizeof(g_su_dir), "%s", dir);
+  snprintf(g_su_dst, sizeof(g_su_dst), "%s/su", g_su_dir);
+  pr_success("Su mount: overlay on %s via %s (lower contents preserved)\n",
+             dir, upper_base);
+  return 1;
+}
+
+static int try_overlay_on(const char *dir) {
+  struct stat st;
+  if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) return 0;
+  for (size_t i = 0; i < sizeof(SU_UPPER_BASES) / sizeof(SU_UPPER_BASES[0]);
+       i++) {
+    if (try_overlay_with(dir, SU_UPPER_BASES[i])) return 1;
+  }
+  pr_info("Su mount: no upperdir worked for %s%s\n", dir,
+          in_default_path(dir) ? "" : " (not in PATH anyway)");
+  return 0;
+}
+
+static int ensure_su_mount(void) {
+  if (g_su_dir[0] && path_is_mounted(g_su_dir)) {
     return 1;
   }
 
-  mkdir(SU_OVL_UPPER, 0755);
-  mkdir(SU_OVL_WORK, 0755);
-  char opts[512];
-  snprintf(opts, sizeof(opts), "lowerdir=%s,upperdir=%s,workdir=%s",
-           g_su_dir, SU_OVL_UPPER, SU_OVL_WORK);
-  if (mount("overlay", g_su_dir, "overlay", 0, opts) == 0) {
-    pr_info("Su mount: overlay on %s\n", g_su_dir);
-    return 1;
+  for (int pass = 0; pass < 2; pass++) {
+    for (size_t i = 0; i < sizeof(SU_DIRS) / sizeof(SU_DIRS[0]); i++) {
+      if (pass == 0 && !in_default_path(SU_DIRS[i])) continue;
+      if (pass == 1 && in_default_path(SU_DIRS[i])) continue;
+      if (try_overlay_on(SU_DIRS[i])) return 1;
+    }
   }
-  pr_info("Su mount: overlay on %s failed errno=%d, trying tmpfs\n",
-          g_su_dir, errno);
 
-  if (mount("tmpfs", g_su_dir, "tmpfs", 0, "mode=0755,size=4m") == 0) {
-    pr_warning("Su mount: tmpfs on %s, existing contents hidden until reboot\n",
-               g_su_dir);
-    return 1;
-  }
-  return errno == EBUSY;
+  pr_warning("Su mount: no directory accepted an overlay; su stays at %s\n",
+             SU_LOCAL);
+  return 0;
 }
 
 static void try_chcon(const char *path) {
@@ -271,8 +313,32 @@ int install_embedded_exp32(const char *path) {
   return 1;
 }
 
+static void sweep_stale_artifacts(void) {
+  static const char *const junk[] = {
+    "/data/local/tmp/.su_upper", "/data/local/tmp/.su_work",
+    "/data/local/tmp/su_daemon.log", "/data/local/tmp/temp_su.sock",
+  };
+  for (size_t i = 0; i < sizeof(junk) / sizeof(junk[0]); i++) {
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s' 2>/dev/null", junk[i]);
+    (void)system(cmd);
+  }
+  (void)system("rm -f /data/local/tmp/ghostlock.stage.* "
+               "/data/local/tmp/gl-* /data/local/tmp/.gl-* 2>/dev/null");
+  (void)system("rm -rf /cache/.ghostlock_upper /cache/.ghostlock_work "
+               "/metadata/.ghostlock_upper /metadata/.ghostlock_work "
+               "/persist/.ghostlock_upper /persist/.ghostlock_work "
+               "2>/dev/null");
+
+  (void)chown("/data/local/tmp", 2000, 2000);
+  (void)chmod("/data/local/tmp", 0771);
+  (void)system("restorecon -R /data/local/tmp 2>/dev/null");
+  pr_info("Cleanup: cleared stale artifacts and restored /data/local/tmp\n");
+}
+
 static void install_extra_su_clients(void) {
   install_local_su_client();
+  sweep_stale_artifacts();
 }
 
 static pid_t start_su_daemon(void) {
@@ -311,9 +377,14 @@ int install_embedded_su(pid_t *daemon_pid) {
     *daemon_pid = -1;
   }
   if (!write_embedded_su()) {
-    return 0;
+    pr_warning("Su install: no PATH host for su (errno=%d); continuing with "
+               "%s\n", errno, SU_LOCAL);
   }
   install_extra_su_clients();
+  if (access(SU_LOCAL, X_OK) != 0) {
+    pr_error("Su install: %s is not executable\n", SU_LOCAL);
+    return 0;
+  }
 
   pid_t pid = start_su_daemon();
   if (pid <= 0) {

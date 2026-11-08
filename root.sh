@@ -1,14 +1,18 @@
 #!/bin/sh
 EXPLOIT_NAME=preload
-EXPLOIT_BUILD=build/${PROJECT:-raspite}/bin/preload
+EXPLOIT_BUILD=build/${PROJECT:-g08}/bin/preload
 REMOTE_DIR=/data/local/tmp
-LOG=$REMOTE_DIR/ghostlock.log
+RUN_ID=$$
+LOG=$REMOTE_DIR/ghostlock.$RUN_ID.log
 CLEAN="$REMOTE_DIR/ghostlock.proof $LOG"
+STALE="$REMOTE_DIR/$EXPLOIT_NAME $REMOTE_DIR/ghostlock.stage.* $REMOTE_DIR/su \
+$REMOTE_DIR/.surc $REMOTE_DIR/su_daemon.log $REMOTE_DIR/temp_su.sock \
+$REMOTE_DIR/.su_upper $REMOTE_DIR/.su_work"
 CAN_EXEC=0
 IS_ROOTED="grep -q ROOTED $REMOTE_DIR/ghostlock.proof"
 IS_READY="grep -aqE 'Su daemon ready|Su install failed' $LOG"
 HAS_FAILED="grep -aqE 'Slide kaslr leak failed|abandoning boot|no ionroot near newest|write did not land' $LOG"
-ROOT_SHELL="if command -v su >/dev/null 2>&1; then exec su; fi; echo 'su is unavailable, using the bind shell on 127.0.0.1:9999'; stty raw -echo 2>/dev/null; exec nc 127.0.0.1 9999"
+ROOT_SHELL="if [ -x /data/local/tmp/su ]; then exec /data/local/tmp/su; fi; if command -v su >/dev/null 2>&1; then exec su; fi; echo 'su is unavailable, using the bind shell on 127.0.0.1:9999'; stty raw -echo 2>/dev/null; exec nc 127.0.0.1 9999"
 DEFAULT_TRIES=8
 DEFAULT_SETTLE=3
 ROOT_TIMEOUT=180
@@ -170,9 +174,29 @@ stage() {
     echo "Device is not online"
     return 1
   fi
-  "$ADB" shell "rm -rf $CLEAN; mkdir -p $REMOTE_DIR" >/dev/null 2>&1 || { echo "Could not prepare $REMOTE_DIR"; return 1; }
-  "$ADB" push "$BIN" "$REMOTE_DIR/$EXPLOIT_NAME" >/dev/null 2>&1 || { echo "Could not push $EXPLOIT_NAME"; return 1; }
-  "$ADB" shell "chmod 755 $REMOTE_DIR/$EXPLOIT_NAME" >/dev/null 2>&1 || { echo "Could not chmod $EXPLOIT_NAME"; return 1; }
+  "$ADB" shell "mkdir -p $REMOTE_DIR" >/dev/null 2>&1 || { echo "Could not prepare $REMOTE_DIR"; return 1; }
+  "$ADB" shell "rm -rf $CLEAN $STALE" >/dev/null 2>&1
+
+  pushed=
+  first_err=
+  for cand in preload gl-$RUN_ID .gl-$RUN_ID; do
+    push_err=$("$ADB" push "$BIN" "$REMOTE_DIR/$cand" 2>&1)
+    if [ $? -eq 0 ] && "$ADB" shell "chmod 755 $REMOTE_DIR/$cand" >/dev/null 2>&1; then
+      EXPLOIT_NAME=$cand
+      pushed=1
+      [ "$cand" = preload ] || echo "Staging as $cand (preload was unusable)"
+      break
+    fi
+    [ -n "$first_err" ] || first_err=$push_err
+    "$ADB" shell "rm -f $REMOTE_DIR/$cand" >/dev/null 2>&1
+  done
+  if [ -z "$pushed" ]; then
+    echo "Could not push $EXPLOIT_NAME under any name:"
+    echo "$first_err" | sed 's/^/  /'
+    echo "  target state:"
+    "$ADB" shell "ls -laZ $REMOTE_DIR 2>&1 | head -20; df -h $REMOTE_DIR 2>&1 | tail -1" 2>&1 | sed 's/^/    /'
+    return 1
+  fi
   [ -n "$TARBALL" ] || return 0
 
   base=$(basename "$TARBALL")

@@ -3,7 +3,7 @@ param(
   [int]$Tries = 0
 )
 
-$Project = if ($env:PROJECT) { $env:PROJECT } else { "raspite" }
+$Project = if ($env:PROJECT) { $env:PROJECT } else { "g08" }
 $ExploitName = "preload"
 $ExploitBuild = "build\$Project\bin\preload"
 $RemoteDir = "/data/local/tmp"

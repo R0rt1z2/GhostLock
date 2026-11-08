@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -49,6 +50,36 @@
 #define EXP_BUFFER_WORDS (EXP_BUFFER_BYTES / sizeof(uint64_t))
 #define EXP_READY_OFFSET (EXP_BUFFER_BYTES + 1)
 #define EXP_READY_MARKER 0x5a
+
+#ifndef STAMP_VIA_SELECT
+#define STAMP_VIA_SELECT 1
+#endif
+#ifndef STAMP_NFDS
+#define STAMP_NFDS 320
+#endif
+#define MARKER_FD_BASE (STAMP_NFDS + 96)
+
+static int relocate_marker_fd(int fd) {
+#if STAMP_VIA_SELECT == 1
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 &&
+        rl.rlim_cur < (rlim_t)(MARKER_FD_BASE + 1)) {
+        rl.rlim_cur = rl.rlim_max;
+        setrlimit(RLIMIT_NOFILE, &rl);
+    }
+    int hi = fcntl(fd, F_DUPFD, MARKER_FD_BASE);
+    if (hi < 0) {
+        pr_warning("Main: marker fd relocation failed errno=%d\n", errno);
+        return fd;
+    }
+    close(fd);
+    pr_info("Main: marker fd %d -> %d (above the widened fd table)\n",
+            fd, hi);
+    return hi;
+#else
+    return fd;
+#endif
+}
 
 static uint32_t f_wait;
 static uint32_t f_pi_target;
@@ -296,6 +327,8 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    buf_fd = relocate_marker_fd(buf_fd);
+
     pr_info("Stage started pid=%d\n", getpid());
     log_stamp_config();
 #ifdef STAMP_TWO_PHASE
@@ -362,8 +395,10 @@ int main(int argc, char **argv) {
     unsigned char done = 0xa5;
     if (pwrite(buf_fd, &done, sizeof(done), EXP_BUFFER_BYTES) !=
         (ssize_t)sizeof(done)) {
-        pr_warning("Main: completion signal failed errno=%d\n", errno);
-        return 1;
+        pr_warning("Main: completion signal failed errno=%d; parking anyway\n",
+                   errno);
+        for (;;)
+            pause();
     }
 
     /* The forged PI/rbtree state is still associated with this process.

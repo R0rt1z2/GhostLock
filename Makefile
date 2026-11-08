@@ -1,5 +1,5 @@
 API ?= 35
-PROJECT ?= raspite
+PROJECT ?= g08
 OUTDIR ?= build/$(PROJECT)/bin
 EMBEDDIR ?= build/$(PROJECT)/embed
 
@@ -146,15 +146,9 @@ $(EMBED_SU): src/su_daemon.c | $(EMBEDDIR)
 
 EXP32_SRCS := src/exp32/main.c src/exp32/stack.c
 
-ifeq ($(PROJECT),raspite)
-  EXP_STAGE_CC := $(TARGET_CC)
-  EXP_STAGE_FLAGS := $(TARGET_FLAGS)
-  EXP_STAGE_LDFLAGS := $(TARGET_PIE_LDFLAGS)
-else
-  EXP_STAGE_CC := $(TARGET_CC32)
-  EXP_STAGE_FLAGS := $(TARGET32_FLAGS)
-  EXP_STAGE_LDFLAGS := $(TARGET32_PIE_LDFLAGS)
-endif
+EXP_STAGE_CC := $(TARGET_CC32)
+EXP_STAGE_FLAGS := $(TARGET32_FLAGS)
+EXP_STAGE_LDFLAGS := $(TARGET32_PIE_LDFLAGS)
 
 $(EMBED_EXP32): $(EXP32_SRCS) src/kernelsnitch/utils.h $(TARGET_HEADER) src/offset.h | $(EMBEDDIR)
 	$(EXP_STAGE_CC) $(EXP_STAGE_FLAGS) -O2 -g0 -Wall -Isrc $(DEBUG_CFLAGS) \

@@ -2,7 +2,7 @@
 set -e
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-PROJECT=${PROJECT:-raspite}
+PROJECT=${PROJECT:-g08}
 EXPLOIT_NAME=preload
 EXPLOIT_BUILD=build/$PROJECT/bin/preload
 EXTRAS=
@@ -114,9 +114,9 @@ echo
 echo "Wrote $ZIP"
 unzip -l "$ZIP" | sed '1,3d' | sed '$d' | sed '$d'
 if command -v sha256sum >/dev/null 2>&1; then
-  sha256sum "$ZIP"
+  sha256sum "$STAGE/bin/$EXPLOIT_NAME" "$ZIP"
 else
-  shasum -a 256 "$ZIP"
+  shasum -a 256 "$STAGE/bin/$EXPLOIT_NAME" "$ZIP"
 fi
 if [ -n "$MISSING" ]; then
   echo "No bundled adb for:$MISSING (users on those hosts need adb on PATH)"

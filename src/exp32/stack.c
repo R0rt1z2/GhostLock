@@ -109,6 +109,11 @@ static void *stamp_udp_flood(void *unused) {
 #define STAMP_WFE_PARK 0
 #endif
 
+#if (STAMP_VIA_SELECT == 1) && \
+    (defined(STAMP_TWO_PHASE) || STAMP_SYNC_FINAL || STAMP_INLINE_RETURN)
+#error "STAMP_VIA_SELECT 1 has no two-phase/sync-final handshake; the consumer would block forever"
+#endif
+
 #define STAMP_MAX_NFDS 4096
 #define STAMP_MAX_SET_BYTES (STAMP_MAX_NFDS / 8)
 #define STAMP_GSR_LEN 264

@@ -238,7 +238,12 @@ for ($i = 1; $i -le $Tries; $i++) {
   }
 
   if ($rooted -and $result -ne "offline") {
-    & $Adb @Sel shell -t $RootShell
+    if ((AdbText shell -t echo ghostlock-tty) -match "ghostlock-tty") {
+      & $Adb @Sel shell -t $RootShell
+      exit $LASTEXITCODE
+    }
+    Write-Host "Rooted. This adb is too old to open the root shell directly; run su (or $RemoteDir/su) in the shell below."
+    & $Adb @Sel shell
     exit $LASTEXITCODE
   }
 

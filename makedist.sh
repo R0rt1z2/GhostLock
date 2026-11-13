@@ -2,10 +2,14 @@
 set -e
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-PROJECT=sheldon
+PROJECT=${PROJECT:-sheldon}
 EXPLOIT_NAME=ghostlock_root
 EXPLOIT_BUILD=build/ghostlock_root
-EXTRAS="flash_preloader.tar downgrade.sh downgrade.ps1 downgrade.bat"
+case "$PROJECT" in
+  sheldon) EXTRAS="flash_preloader.tar downgrade.sh downgrade.ps1 downgrade.bat" ;;
+  mantis) EXTRAS="mantis/flash_preloader.tar mantis/downgrade.sh mantis/downgrade.ps1 mantis/downgrade.bat" ;;
+  *) echo "Unknown PROJECT=$PROJECT"; exit 1 ;;
+esac
 
 CACHE=${CACHE:-$HOME/android-ndk-cache}
 NDK_VER=${NDK_VER:-android-ndk-r29}
@@ -75,7 +79,7 @@ if [ -n "$EXTRAS" ]; then
       [ -f "$HERE/$f" ] || { echo "$1 is present but $f is missing"; exit 1; }
       cp "$HERE/$f" "$STAGE/"
       case "$f" in
-        *.sh) chmod 755 "$STAGE/$f" ;;
+        *.sh) chmod 755 "$STAGE/$(basename "$f")" ;;
       esac
     done
   else

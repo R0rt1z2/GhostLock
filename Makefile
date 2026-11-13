@@ -1,4 +1,4 @@
-API      ?= 28
+API      ?= 25
 VERSION  := $(shell cat VERSION 2>/dev/null || echo 0.0.0)
 OUTDIR   ?= build
 SHA256SUM ?= $(if $(shell command -v sha256sum 2>/dev/null),sha256sum,shasum -a 256)
@@ -27,11 +27,33 @@ DEBUG_CFLAGS := $(if $(filter 1,$(DEBUG)),-DDEBUG,)
 CFLAGS := -O2 -g0 -Wall -Wextra -fPIE -pie -pthread \
           -Wno-unused-parameter -Wno-sign-compare $(DEBUG_CFLAGS)
 
+define CLEAR_DF_1_PIE
+f=$$1
+u() { od -An -t u$$2 -j $$1 -N $$2 "$$f" | tr -d ' \n'; }
+phoff=$$(u 28 4); phent=$$(u 42 2); phnum=$$(u 44 2); i=0
+while [ $$i -lt $$phnum ]; do
+  ph=$$((phoff + i * phent))
+  if [ "$$(u $$ph 4)" = 2 ]; then
+    dyn=$$(u $$((ph + 4)) 4); end=$$((dyn + $$(u $$((ph + 16)) 4)))
+    while [ $$dyn -lt $$end ]; do
+      if [ "$$(u $$dyn 4)" = 1879048187 ]; then
+        b=$$(u $$((dyn + 7)) 1)
+        printf "\\$$(printf %03o $$((b & 247)))" | dd of="$$f" bs=1 seek=$$((dyn + 7)) conv=notrunc 2>/dev/null
+      fi
+      dyn=$$((dyn + 8))
+    done
+  fi
+  i=$$((i + 1))
+done
+endef
+export CLEAR_DF_1_PIE
+
 .PHONY: all clean info
 all: $(BIN)
 
 $(BIN): $(SRCS) $(HDRS) | $(OUTDIR)
 	$(TARGET_CC) $(CFLAGS) $(SRCS) -o $@
+	@sh -c "$$CLEAR_DF_1_PIE" sh $@
 	@$(SHA256SUM) $@
 
 $(OUTDIR):

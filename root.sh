@@ -276,7 +276,11 @@ for i in $(seq "$TRIES"); do
   fi
 
   if [ "$rooted" = 1 ] && [ "$result" != offline ]; then
-    exec "$ADB" shell -t "$ROOT_SHELL"
+    if "$ADB" shell -t echo ghostlock-tty 2>/dev/null | grep -q ghostlock-tty; then
+      exec "$ADB" shell -t "$ROOT_SHELL"
+    fi
+    echo "Rooted. This adb is too old to open the root shell directly; run su (or $REMOTE_DIR/su) in the shell below."
+    exec "$ADB" shell
   fi
 
   case "$result" in

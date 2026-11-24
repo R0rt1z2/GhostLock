@@ -2,7 +2,7 @@
 set -e
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-PROJECT=${PROJECT:-raspite}
+PROJECT=${PROJECT:-quartz}
 EXPLOIT_NAME=preload
 EXPLOIT_BUILD=build/$PROJECT/bin/preload
 EXTRAS=
@@ -64,7 +64,7 @@ BIN=$HERE/$EXPLOIT_BUILD
 rm -rf "$STAGE" "$ZIP"
 mkdir -p "$STAGE/bin"
 cp "$BIN" "$STAGE/bin/$EXPLOIT_NAME"
-cp "$HERE/root.sh" "$HERE/root.ps1" "$HERE/root.bat" "$HERE/README.md" "$STAGE/"
+cp "$HERE/root.sh" "$HERE/root.ps1" "$HERE/root.bat" "$STAGE/"
 chmod 755 "$STAGE/root.sh"
 echo "$VERSION" > "$STAGE/VERSION"
 
@@ -107,6 +107,8 @@ for os in linux darwin windows; do
     chmod 755 "$STAGE/bin/$dest/adb"
   fi
 done
+
+find "$STAGE" -name '*.md' -delete
 
 ( cd "$DIST" && zip -qr "$NAME.zip" "$NAME" )
 

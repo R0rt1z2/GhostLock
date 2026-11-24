@@ -2,3 +2,5 @@ build/
 dist/
 out/
 boot.img
+.DS_Store
+__pycache__/

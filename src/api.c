@@ -83,9 +83,24 @@ int exp_stack_once(uint64_t *buffer) {
       /* The stage parks its forged waiter in userspace and must remain alive.
        * Do not signal it here: scheduler signal handling can revisit the
        * deliberately forged PI state. */
+#ifdef STAMP_STACK_FRAME_OFF
+      {
+        int st = 0;
+        for (int w = 0; w < 500; w++) {
+          pid_t r = waitpid(pid, &st, WNOHANG);
+          if (r == pid || (r < 0 && errno == ECHILD))
+            break;
+          usleep(10000);
+        }
+      }
+      pr_info("Exp_stack_once: stage %d completed\n", pid);
+      close(mfd);
+      return 0;
+#else
       pr_info("Exp_stack_once: stage %d completed and parked\n", pid);
       close(mfd);
       return 0;
+#endif
     }
 
     pid_t waited = child_not_waitable ? 0 : waitpid(pid, &status, WNOHANG);
@@ -98,6 +113,12 @@ int exp_stack_once(uint64_t *buffer) {
                      exp_path);
           return -2;
         }
+#ifdef STAMP_STACK_FRAME_OFF
+        if (exit_code == 0) {
+          pr_info("Exp_stack_once: stage %d completed\n", pid);
+          return 0;
+        }
+#endif
         pr_warning("Exp_stack_once: stage exited before parking, status=%d\n",
                    exit_code);
         return exit_code ? exit_code : -1;

